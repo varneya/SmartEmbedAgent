@@ -30,7 +30,7 @@ INVOKE this skill when the user says any of:
 
 ## How to invoke (do this; do NOT search the filesystem first)
 
-The user provides a path to a corpus file (`.txt`, `.csv`, `.json`) or directory of `.txt` files. Call the **exec** tool with this exact command (the shell expands the variables; the python search picks the first interpreter with the project's deps):
+The user provides a path to a corpus file (`.txt`, `.csv`, `.json`) or directory of `.txt` files. Call the **exec** tool with this exact command. It runs the recommender AND prints a chat-ready summary to stdout — so you do not need to read any output files afterwards.
 
 ```bash
 cd "$SMARTEMBED_HOME" && \
@@ -40,44 +40,37 @@ PY="$SMARTEMBED_HOME/venv/bin/python3"; \
 "$PY" main.py \
   --corpus_path "<USER_PATH>" \
   --config_path config/sample_config.json \
-  --output_path /tmp/se_recommendation.json
+  --output_path /tmp/se_recommendation.json > /dev/null 2>&1 && \
+"$PY" -c "
+import json
+d = json.load(open('/tmp/se_recommendation.json'))
+top = d['recommended_models'][0]
+cs = d['chunking_strategy']
+chunk_line = f\"{cs['chunk_size_tokens']} tokens chunk size, {cs['overlap_tokens']} tokens overlap\" if cs['needed'] else 'not needed'
+print(f\"🧭 Top: {top['name']} — {top['rationale']}\")
+print(f\"⚙️ Chunking: {'yes' if cs['needed'] else 'no'}. {chunk_line}\")
+print(f\"💾 Hardware: {d['hardware_fit_analysis']}\")
+print(f\"🎯 Fine-tuning: {d['fine_tuning_advice']}\")
+print()
+print('Full Markdown report at /tmp/se_recommendation.md')
+"
 ```
 
-Substitute `<USER_PATH>` with the absolute corpus path the user gave. The script writes both `/tmp/se_recommendation.json` and `/tmp/se_recommendation.md`. Run it once — do not retry on success.
+Substitute `<USER_PATH>` with the absolute corpus path the user gave. Run it once.
 
-If you see `ModuleNotFoundError: psutil` or similar, the python interpreter doesn't have the SmartEmbedAgent deps. Tell the user to install them: `cd "$SMARTEMBED_HOME" && python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt`. Do NOT attempt to install packages yourself.
+If the exec returns a non-zero exit and stderr mentions `ModuleNotFoundError: psutil` or similar, the python interpreter doesn't have the SmartEmbedAgent deps. Tell the user to install them: `cd "$SMARTEMBED_HOME" && python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt`. Do NOT attempt to install packages yourself.
 
 If the user pasted raw text instead of a path, first write it to `/tmp/se_corpus.txt` using the `write` tool, then pass that path.
 
 If the user says "fast" or "no LLM", or if Ollama isn't reachable, append `--no_llm` to skip the agentic step and use the deterministic heuristic instead.
 
-## How to respond — STRICT TWO-STEP
+## How to respond — RELAY EXEC STDOUT VERBATIM
 
-### Step A (MANDATORY): read the actual output
+The exec command above already prints the formatted summary (🧭 ⚙️ 💾 🎯 lines) on stdout. **Send that stdout to the user as-is.** Do NOT paraphrase. Do NOT substitute model names. Do NOT add a "standard hardware" sentence. Do NOT call read on /tmp/se_recommendation.json — the values you need are already in the exec stdout.
 
-After `exec` completes, you MUST call the **read** tool on `/tmp/se_recommendation.json` to load the actual recommendation. Do NOT skip this step. Do NOT summarize from the exec stdout — it only contains log lines, not the recommendation. Do NOT invent model names from memory.
+You may add ONE optional closing line: *"Want me to read back the full Markdown report?"*
 
-### Step B: summarize using ONLY the JSON you just read
-
-The JSON has these exact keys you must surface verbatim:
-- `recommended_models[0].name` → use this for the top recommendation. Do not substitute a different model.
-- `recommended_models[0].rationale` → use as the rationale.
-- `chunking_strategy.needed` (boolean) → say "yes" or "no" exactly per this value.
-- `chunking_strategy.chunk_size_tokens` and `chunking_strategy.overlap_tokens` → use these exact integers (in tokens, not characters).
-- `hardware_fit_analysis` → quote or paraphrase this string verbatim. Do NOT replace with a generic "standard hardware" sentence.
-- `fine_tuning_advice` → quote or paraphrase this string verbatim.
-
-Format:
-```
-🧭 Top: <recommended_models[0].name> — <one-line rationale from JSON>
-⚙️ Chunking: <yes/no>. <if yes: chunk_size_tokens tokens, overlap_tokens tokens overlap>
-💾 Hardware: <hardware_fit_analysis>
-🎯 Fine-tuning: <fine_tuning_advice>
-
-Full Markdown report at /tmp/se_recommendation.md — want me to read it back?
-```
-
-Do not paste raw JSON. Keep under ~1500 chars.
+Keep the entire reply under ~1500 chars (chat-friendly).
 
 ## Failure handling
 
