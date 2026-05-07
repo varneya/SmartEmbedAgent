@@ -1,8 +1,20 @@
 ---
 name: recommend-embedding-model
 description: Recommend the optimal embedding model for a corpus given hardware, privacy, and corpus shape. Returns ranked models, chunking strategy, and fine-tuning advice. Runs SmartEmbedAgent locally via Ollama on Apple Silicon.
+homepage: https://github.com/varneya/SmartEmbedAgent
 user-invocable: true
-metadata: {"openclaw": {"requires": {"bins": ["python", "ollama"], "env": ["SMARTEMBED_HOME"]}}}
+metadata:
+  {
+    "openclaw":
+      {
+        "emoji": "🧭",
+        "requires":
+          {
+            "bins": ["python3", "ollama"],
+            "env": ["SMARTEMBED_HOME"],
+          },
+      },
+  }
 ---
 
 # Recommend an embedding model
@@ -25,7 +37,7 @@ Use this skill when the user asks for any of:
 Use the `exec` tool with `workdir` set to `$SMARTEMBED_HOME`:
 
 ```
-python main.py \
+python3 main.py \
   --corpus_path <CORPUS_PATH> \
   --config_path <CONFIG_PATH> \
   --output_path /tmp/se_recommendation.json
