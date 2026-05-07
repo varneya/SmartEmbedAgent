@@ -1,0 +1,28 @@
+{
+  "recommended_models": [
+    {
+      "name": "sentence-transformers/all-MiniLM-L6-v2",
+      "rank": 1,
+      "rationale": "Context window 256, tiny (~80 MB). CPU-friendly. Open-source / on-device \u2014 privacy-preserving."
+    },
+    {
+      "name": "sentence-transformers/all-mpnet-base-v2",
+      "rank": 2,
+      "rationale": "Context window 384, medium (~420 MB). CPU-friendly. Open-source / on-device \u2014 privacy-preserving."
+    },
+    {
+      "name": "BAAI/bge-small-en-v1.5",
+      "rank": 3,
+      "rationale": "Context window 512, small (~130 MB). CPU-friendly. Open-source / on-device \u2014 privacy-preserving."
+    }
+  ],
+  "reasoning_explanation": "Detected 0 PII redactions (standard privacy). Corpus has 11 documents averaging 41.09 tokens. No chunking required. Selected model balances corpus size, hardware, and privacy.",
+  "chunking_strategy": {
+    "needed": false,
+    "chunk_size_tokens": null,
+    "overlap_tokens": null,
+    "rationale": "Documents fit comfortably within compact-model context windows."
+  },
+  "fine_tuning_advice": "Not necessary as a first pass. The corpus is lexically diverse enough that a strong general-purpose embedding model should perform well; revisit only if retrieval quality is poor.",
+  "hardware_fit_analysis": "Total RAM: 3.81 GB. CPU-only. Top recommendation 'sentence-transformers/all-MiniLM-L6-v2' is tiny (~80 MB) \u2014 fits comfortably."
+}

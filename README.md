@@ -93,7 +93,7 @@ For the full breakdown, see [`docs/decision_points.md`](docs/decision_points.md)
 ## Installation
 
 ```bash
-git clone https://github.com/<your-username>/SmartEmbedAgent.git
+git clone https://github.com/varneya/SmartEmbedAgent.git
 cd SmartEmbedAgent
 python -m venv venv
 source venv/bin/activate
