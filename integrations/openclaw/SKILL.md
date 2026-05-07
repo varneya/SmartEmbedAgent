@@ -19,48 +19,53 @@ metadata:
 
 # Recommend an embedding model
 
-Use this skill when the user asks for any of:
-- "What embedding model should I use for X?"
-- "Pick an embedding model for this corpus"
-- "Recommend an embedding model for [a file path / a directory / pasted text]"
-- "Should I chunk my documents? What chunk size?"
-- "Should I fine-tune for my domain?"
+## When to use this skill
 
-## Inputs to gather from the user
+INVOKE this skill when the user says any of:
+- "Recommend an embedding model …"
+- "What embedding model should I use for …"
+- "Pick an embedding model for …"
+- "Should I chunk my documents?" (a corpus is involved)
+- "Should I fine-tune for my domain?" (a corpus is involved)
 
-1. **Corpus**: a path to a `.txt`, `.csv`, or `.json` file, or a directory of `.txt` files. If the user pastes raw text instead of a path, save it to `/tmp/se_corpus.txt` first using the file-write tool, then use that path.
-2. **Config** (optional): path to a JSON config file. Default to `config/sample_config.json` if not specified.
-3. **Use LLM reasoning?** (optional): default yes (uses Ollama). If the user says "fast" or "no LLM" or Ollama isn't running, append `--no_llm`.
+## How to invoke (do this; do NOT search the filesystem first)
 
-## How to invoke
+The user provides a path to a corpus file (`.txt`, `.csv`, `.json`) or directory of `.txt` files. Call the **exec** tool with this exact command (the shell expands `$SMARTEMBED_HOME` and `$CORPUS_PATH`):
 
-Use the `exec` tool with `workdir` set to `$SMARTEMBED_HOME`:
-
-```
-python3 main.py \
-  --corpus_path <CORPUS_PATH> \
-  --config_path <CONFIG_PATH> \
+```bash
+cd "$SMARTEMBED_HOME" && CORPUS_PATH="<USER_PATH>" python3 main.py \
+  --corpus_path "$CORPUS_PATH" \
+  --config_path config/sample_config.json \
   --output_path /tmp/se_recommendation.json
 ```
 
-Add `--no_llm` if the user requested heuristic-only mode, or if a previous LLM-mode run failed because Ollama wasn't reachable.
+Substitute `<USER_PATH>` with the absolute corpus path the user gave. The script writes both `/tmp/se_recommendation.json` and `/tmp/se_recommendation.md`. Run it once — do not retry on success.
+
+If the user pasted raw text instead of a path, first write it to `/tmp/se_corpus.txt` using the `write` tool, then pass that path.
+
+If the user says "fast" or "no LLM", or if Ollama isn't reachable, append `--no_llm` to skip the agentic step and use the deterministic heuristic instead.
 
 ## How to respond
 
-After the command completes, read `/tmp/se_recommendation.json` and summarize for the user. Keep the reply under ~1500 characters (chat-friendly):
+Read `/tmp/se_recommendation.json` with the **read** tool. Reply with a chat-friendly summary under ~1500 characters:
 
-- **Top recommendation**: model name + 1-line rationale
-- **Chunking**: needed yes/no; if yes, chunk size and overlap
-- **Hardware fit**: 1 sentence (e.g. "Fits comfortably on your M2 Pro's 32GB unified memory")
-- **Fine-tuning**: 1 sentence (yes / not necessary / why)
+- 🧭 **Top recommendation**: model name + 1-line rationale
+- ⚙️ **Chunking**: yes/no; if yes, chunk size + overlap
+- 💾 **Hardware fit**: 1 sentence
+- 🎯 **Fine-tuning**: yes/no/why
 
-Format as a clean message with light emoji headers (📊 ⚙️ 💾 🎯) — they render well in WhatsApp / Telegram / Signal. Do not paste raw JSON.
+Do not paste raw JSON. End with: *"Full Markdown report at `/tmp/se_recommendation.md` — want me to read it back?"*
 
-End with: "Full Markdown report at `/tmp/se_recommendation.md` — want me to read it back?"
+## Failure handling
 
-## Failure modes
+| Symptom | Action |
+|---|---|
+| `SMARTEMBED_HOME: unbound` | Tell user: `export SMARTEMBED_HOME=~/path/to/SmartEmbedAgent` and reopen OpenClaw. |
+| Ollama / connection / model errors in stderr | Re-run with `--no_llm`. Mention the result is from the deterministic heuristic. |
+| Corpus file not found | Confirm the path with the user; offer to list the parent directory. |
+| Non-zero exit | Surface the relevant stderr line. Do not retry blindly. |
 
-- **`SMARTEMBED_HOME` not set** → tell the user to export it and point to their cloned repo, e.g. `export SMARTEMBED_HOME=~/code/SmartEmbedAgent`.
-- **Ollama not reachable / model not pulled** → re-invoke with `--no_llm` and note that the recommendation came from the deterministic heuristic; suggest `ollama serve` + `ollama pull hermes3:8b` for the agentic version.
-- **Corpus file not found** → ask the user to confirm the path; offer to list the directory.
-- **Non-zero exit code** → read stderr from the exec output and surface the relevant error line; do not retry blindly.
+## Important
+
+- The script is fast (~1–5 seconds heuristic, ~10–30 seconds with LLM). Do not spawn it as a background process.
+- The skill IS the SmartEmbedAgent repo — do not go looking for it elsewhere on the filesystem; it lives at `$SMARTEMBED_HOME` (already verified at skill-load time).
