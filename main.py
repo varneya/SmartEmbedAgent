@@ -95,6 +95,7 @@ def load_corpus(path: Path) -> str:
     """Load a corpus from disk, returning a single joined string. Documents
     are joined with double newlines so the corpus analyzer's blank-line
     splitting recovers them as separate documents."""
+    path = path.expanduser()
     if not path.exists():
         raise FileNotFoundError(f"Corpus file not found: {path}")
 
@@ -280,7 +281,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Step 1: validate config.
     _step_announce(PIPELINE_STEPS[0], total_steps, 0)
     try:
-        config, errors = load_and_validate(Path(args.config_path), Path(args.schema))
+        config, errors = load_and_validate(Path(args.config_path).expanduser(), Path(args.schema).expanduser())
     except FileNotFoundError as e:
         log.error("Config file not found: %s", e)
         return 2
@@ -300,7 +301,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Step 2: load corpus.
     _step_announce(PIPELINE_STEPS[1], total_steps, 1)
     try:
-        corpus = load_corpus(Path(args.corpus_path))
+        corpus = load_corpus(Path(args.corpus_path).expanduser())
         log.info("Loaded corpus: %d characters.", len(corpus))
     except (FileNotFoundError, ValueError) as e:
         log.error("Failed to load corpus: %s", e)
@@ -358,7 +359,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     # Step 5: write outputs.
     _step_announce(PIPELINE_STEPS[4], total_steps, 4)
-    output_path = Path(args.output_path)
+    output_path = Path(args.output_path).expanduser()
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(recommendation, indent=2), encoding="utf-8")
     md_path = output_path.with_suffix(".md")
