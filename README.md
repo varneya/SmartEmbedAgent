@@ -6,7 +6,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Tests](https://img.shields.io/badge/tests-123%20passing-brightgreen.svg)](#tests)
 
-SmartEmbedAgent profiles your hardware, sanitizes your corpus of PII, analyzes the cleaned text, and uses a Claude-powered LangChain agent to recommend the right embedding model and chunking strategy for your use case. It picks `BGE-small` for a CPU-only laptop running on a privacy-sensitive corpus, and `text-embedding-3-large` for a workstation indexing public documents — and explains why.
+SmartEmbedAgent profiles your hardware, sanitizes your corpus of PII, analyzes the cleaned text, and uses a **local LLM** (Ollama, Apple Silicon Metal-accelerated) to recommend the right embedding model and chunking strategy for your use case. It picks `BGE-small` for a CPU-only laptop running on a privacy-sensitive corpus, and `BGE-M3` for an M2 Pro indexing long technical documents — and explains why. **No API keys required. Runs fully on-device.**
 
 ## Table of Contents
 
@@ -37,7 +37,7 @@ Picking an embedding model is rarely a one-size-fits-all decision. The right cho
 
 A deterministic script can encode some of this as if/else logic, but the trade-offs don't compose cleanly. Should I upgrade to a long-context model or chunk? Should I fine-tune given my corpus characteristics? Are recent benchmark releases relevant to my domain? These are judgment calls that benefit from reasoning, not rules.
 
-SmartEmbedAgent splits responsibilities accordingly: deterministic Python tools measure facts (RAM, GPU, token counts, PII volume), and a Claude-backed agent reasons over those facts to produce an explainable recommendation.
+SmartEmbedAgent splits responsibilities accordingly: deterministic Python tools measure facts (RAM, GPU, token counts, PII volume), and a local LLM (Hermes 3 8B via Ollama by default) reasons over those facts to produce an explainable recommendation — entirely on-device.
 
 ## Architecture
 
@@ -45,7 +45,7 @@ SmartEmbedAgent splits responsibilities accordingly: deterministic Python tools 
 flowchart TD
     User([User]) -->|corpus + config| Main[main.py CLI]
     Main --> Validator[config_validator]
-    Main --> Agent[LangChain Agent<br/>ChatAnthropic]
+    Main --> Agent[LangChain Agent<br/>ChatOllama · hermes3:8b]
 
     Agent -->|tool call 1| Profiler[device_profiler]
     Agent -->|tool call 2| PII[pii_remover<br/>regex + NER]
@@ -66,11 +66,11 @@ Tools share state through a module-level `AgentContext` so the corpus and interm
 
 ## Reasoning Decision Points
 
-The Claude agent makes the following decisions; the rest is deterministic Python code.
+The local LLM agent makes the following decisions; the rest is deterministic Python code.
 
 | Decision | Why an LLM | Concrete example |
 |---|---|---|
-| **Chunk vs. upgrade context window** | Cost/latency/accuracy trade-off depends on user's downstream workload, which isn't captured in the corpus alone. | "Your corpus has 30% docs over 2000 tokens. Since you're CPU-only and latency-sensitive, I recommend chunking with BGE-small rather than switching to a long-context model." |
+| **Chunk vs. upgrade context window** | Cost/latency/accuracy trade-off depends on user's downstream workload, which isn't captured in the corpus alone. | "Your corpus has 30% docs over 2000 tokens. Since you're on an 8GB M1 and latency-sensitive, I recommend chunking with BGE-small rather than switching to a long-context model." |
 | **Model pick from candidate pool** | Heuristic ranking is a starting point; LLM can override based on freshness, licensing, domain reputation. | "BGE-small ranks higher than MiniLM by token-fit, but for your medical corpus I'd pick `pritamdeka/PubMedBERT-mnli-snli-stsb` — domain-tuned models matter more than the leaderboard delta here." |
 | **Fine-tuning recommendation** | Depends on data volume, label availability, and resource budget — softer signals than the heuristic alone. | "TTR is 0.18 and your top-10 terms are highly concentrated, but you only have 200 documents. I recommend an off-the-shelf model first; revisit fine-tuning if retrieval quality is poor after a baseline run." |
 | **When to invoke web search** | Knowing whether benchmark currency matters for the user's situation requires judgment. | "You haven't specified a domain, so I'll skip the web search for domain-specific benchmarks and trust the recent MTEB leaderboard." |
@@ -82,17 +82,27 @@ For the full breakdown, see [`docs/decision_points.md`](docs/decision_points.md)
 
 ## Key Features
 
-- **Agentic reasoning** — Claude weighs hardware, privacy, corpus shape, and domain together rather than applying a fixed scoring function.
+- **Agentic reasoning, fully local** — a Hermes 3 8B model running on your Mac (via Ollama) weighs hardware, privacy, corpus shape, and domain together rather than applying a fixed scoring function. No API keys, no data leaves your machine.
 - **Layered PII removal** — regex for high-confidence patterns + Hugging Face NER for named entities, with user whitelist and force-redaction list.
-- **Hardware-aware** — `psutil` + `torch.cuda` detection with NVIDIA / AMD ROCm / CPU fallbacks.
+- **Hardware-aware** — `psutil` + `torch` detection with NVIDIA CUDA, AMD ROCm, **Apple Silicon Metal (MPS)**, and CPU fallbacks. Reports unified memory on M-series Macs.
 - **Configurable tokenization** — pass the tokenizer matching your target embedding model for exact token counts.
 - **Cached web search** — the agent can pull current best-practices and benchmarks; results cached to disk with TTL.
-- **Deterministic fallback** — the same JSON schema is emitted by a no-LLM heuristic path, useful for CI and air-gapped environments.
+- **Deterministic fallback** — the same JSON schema is emitted by a no-LLM heuristic path. Useful for CI and used automatically when Ollama is unreachable.
 - **Structured outputs** — JSON for programmatic use, Markdown report for humans.
 
 ## Installation
 
+### Quickstart on Apple Silicon (recommended)
+
 ```bash
+# 1. Install and start Ollama (the local LLM runtime)
+brew install ollama
+ollama serve &                       # leave running in the background
+
+# 2. Pull the default reasoning model (~4.9 GB)
+ollama pull hermes3:8b
+
+# 3. Install SmartEmbedAgent
 git clone https://github.com/varneya/SmartEmbedAgent.git
 cd SmartEmbedAgent
 python -m venv venv
@@ -100,13 +110,21 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-For LLM-driven reasoning, set an Anthropic API key:
+That's it — no API keys, no signups. The agent uses Apple Silicon's Metal acceleration (MPS) automatically.
+
+### Choosing a different model
+
+Override via env var (no code change needed):
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...
+export SMARTEMBED_LLM_MODEL=qwen3:8b              # better raw reasoning
+export SMARTEMBED_LLM_MODEL=qwen3:30b-a3b         # premium quality, 32GB+ Macs
+export SMARTEMBED_LLM_MODEL=qwen3:4b              # tiny, fits 8GB Macs
 ```
 
-The deterministic fallback works without an API key, so you can verify your install with:
+### Heuristic-only mode (no LLM needed)
+
+The deterministic fallback works without Ollama, so you can verify your install with:
 
 ```bash
 make test
@@ -151,7 +169,7 @@ result = run_pipeline_no_llm(
     user_config={"whitelist": ["Acme"], "redaction_list": ["Project Falcon"]},
 )
 
-# Agentic path — requires ANTHROPIC_API_KEY
+# Agentic path — requires Ollama running locally with hermes3:8b pulled
 agent = build_agent(corpus="...", user_config={...})
 response = agent.invoke({"input": "Analyze this corpus and recommend a model."})
 ```
@@ -199,13 +217,14 @@ Full sample runs are in [`docs/DEMO_OUTPUT.md`](docs/DEMO_OUTPUT.md).
 
 |  | Agentic (this project) | Deterministic script |
 |---|---|---|
-| **Model pick** | Reasoned over hardware, privacy, domain, freshness, cost | Lookup table or fixed scoring function |
+| **Model pick** | Reasoned over hardware, privacy, domain, freshness | Lookup table or fixed scoring function |
 | **Trade-off awareness** | Yes — explains why one option beats another | Implicit in the score |
 | **Adapts to new context** | Yes — user's domain, resource limits, latency tolerance | Requires code changes |
 | **Explainability** | Free-form `reasoning_explanation` field | Limited to ranked output |
-| **Reproducibility** | Variable across runs (LLM is non-deterministic) | Fully reproducible |
-| **Cost per recommendation** | LLM tokens per run | Free |
-| **Best for** | One-off / occasional analysis where context matters | High-frequency or compliance-bound use |
+| **Reproducibility** | Variable across runs (LLM is non-deterministic, but `temperature=0`) | Fully reproducible |
+| **Cost per recommendation** | Local compute only (no API calls) | Free |
+| **Privacy** | Fully on-device — corpus never leaves your machine | Same |
+| **Best for** | One-off / occasional analysis where context matters | High-frequency or air-gapped use |
 
 SmartEmbedAgent ships both: the agent for production use, the deterministic fallback for CI and audit.
 
@@ -224,9 +243,13 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development setup, code style, and 
 
 ## Acknowledgments
 
-- **Anthropic** for Claude and the LangChain Anthropic integration.
+- **Ollama** for making local LLM serving on Apple Silicon trivial.
+- **Nous Research** for Hermes 3, the default tool-calling reasoning model.
+- **Alibaba** for the Qwen 3 family (alternative reasoning models).
 - **Hugging Face** for the NER models, tokenizers, and the `transformers` ecosystem.
-- **BAAI** for the BGE family.
+- **BAAI** for the BGE family of embedding models.
+- **Nomic AI** for `nomic-embed-text-v1.5`.
+- **mixedbread.ai** for `mxbai-embed-large-v1`.
 - **`dslim`** for `dslim/bert-base-NER`, the default NER model used in the PII pipeline.
 - The **LangChain** project for the agent framework that ties everything together.
 

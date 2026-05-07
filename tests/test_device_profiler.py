@@ -36,6 +36,10 @@ REQUIRED_KEYS = {
     "compute_device",
 }
 
+# Apple Silicon adds optional fields (apple_silicon, chip_name,
+# unified_memory_gb) that only appear on M-series Macs.
+APPLE_SILICON_KEYS = {"apple_silicon", "chip_name", "unified_memory_gb"}
+
 
 class TestSpecShape(unittest.TestCase):
     """The dictionary shape is the public contract — assert it carefully."""
@@ -47,7 +51,11 @@ class TestSpecShape(unittest.TestCase):
         self.assertIsInstance(self.specs, dict)
 
     def test_has_all_required_keys(self):
-        self.assertEqual(set(self.specs.keys()), REQUIRED_KEYS)
+        keys = set(self.specs.keys())
+        self.assertTrue(REQUIRED_KEYS.issubset(keys), f"missing: {REQUIRED_KEYS - keys}")
+        # Any extra keys must be the documented Apple Silicon optional set.
+        extra = keys - REQUIRED_KEYS
+        self.assertTrue(extra.issubset(APPLE_SILICON_KEYS), f"unexpected keys: {extra - APPLE_SILICON_KEYS}")
 
     def test_field_types(self):
         self.assertIsInstance(self.specs["total_ram_gb"], float)
@@ -59,7 +67,7 @@ class TestSpecShape(unittest.TestCase):
         self.assertIsInstance(self.specs["compute_device"], str)
 
     def test_compute_device_is_known(self):
-        self.assertIn(self.specs["compute_device"], {"cuda", "rocm", "cpu"})
+        self.assertIn(self.specs["compute_device"], {"cuda", "rocm", "mps", "cpu"})
 
     def test_ram_values_are_positive(self):
         self.assertGreater(self.specs["total_ram_gb"], 0.0)
@@ -76,7 +84,8 @@ class TestCPUFallback(unittest.TestCase):
 
     def test_cpu_only_fallback(self):
         with mock.patch.object(device_profiler, "_detect_nvidia_gpu", return_value={}), \
-             mock.patch.object(device_profiler, "_detect_amd_gpu", return_value={}):
+             mock.patch.object(device_profiler, "_detect_amd_gpu", return_value={}), \
+             mock.patch.object(device_profiler, "_detect_apple_silicon_mps", return_value={}):
             specs = get_hardware_specs()
 
         self.assertFalse(specs["gpu_available"])
@@ -96,7 +105,8 @@ class TestGPUDetection(unittest.TestCase):
             "compute_device": "cuda",
         }
         with mock.patch.object(device_profiler, "_detect_nvidia_gpu", return_value=fake_nvidia), \
-             mock.patch.object(device_profiler, "_detect_amd_gpu", return_value={}):
+             mock.patch.object(device_profiler, "_detect_amd_gpu", return_value={}), \
+             mock.patch.object(device_profiler, "_detect_apple_silicon_mps", return_value={}):
             specs = get_hardware_specs()
 
         self.assertTrue(specs["gpu_available"])
@@ -112,11 +122,54 @@ class TestGPUDetection(unittest.TestCase):
             "compute_device": "rocm",
         }
         with mock.patch.object(device_profiler, "_detect_nvidia_gpu", return_value={}), \
-             mock.patch.object(device_profiler, "_detect_amd_gpu", return_value=fake_amd):
+             mock.patch.object(device_profiler, "_detect_amd_gpu", return_value=fake_amd), \
+             mock.patch.object(device_profiler, "_detect_apple_silicon_mps", return_value={}):
             specs = get_hardware_specs()
 
         self.assertTrue(specs["gpu_available"])
         self.assertEqual(specs["compute_device"], "rocm")
+
+    def test_simulated_apple_silicon_mps_when_no_other_gpu(self):
+        fake_mps = {
+            "gpu_available": True,
+            "gpu_name": "Apple M2 Pro",
+            "gpu_memory_gb": 0.0,
+            "compute_device": "mps",
+            "apple_silicon": True,
+            "chip_name": "Apple M2 Pro",
+            "unified_memory_gb": 32.0,
+        }
+        with mock.patch.object(device_profiler, "_detect_nvidia_gpu", return_value={}), \
+             mock.patch.object(device_profiler, "_detect_amd_gpu", return_value={}), \
+             mock.patch.object(device_profiler, "_detect_apple_silicon_mps", return_value=fake_mps):
+            specs = get_hardware_specs()
+
+        self.assertTrue(specs["gpu_available"])
+        self.assertEqual(specs["compute_device"], "mps")
+        self.assertEqual(specs["gpu_name"], "Apple M2 Pro")
+        self.assertEqual(specs["gpu_memory_gb"], 0.0)
+        self.assertTrue(specs["apple_silicon"])
+        self.assertEqual(specs["chip_name"], "Apple M2 Pro")
+        self.assertEqual(specs["unified_memory_gb"], 32.0)
+
+    def test_nvidia_takes_precedence_over_mps(self):
+        """If both CUDA and MPS were somehow available, NVIDIA wins (precedence
+        order in the docstring)."""
+        fake_nvidia = {
+            "gpu_available": True,
+            "gpu_name": "NVIDIA GeForce RTX 4090",
+            "gpu_memory_gb": 24.0,
+            "compute_device": "cuda",
+        }
+        fake_mps = {
+            "gpu_available": True,
+            "compute_device": "mps",
+        }
+        with mock.patch.object(device_profiler, "_detect_nvidia_gpu", return_value=fake_nvidia), \
+             mock.patch.object(device_profiler, "_detect_amd_gpu", return_value={}), \
+             mock.patch.object(device_profiler, "_detect_apple_silicon_mps", return_value=fake_mps):
+            specs = get_hardware_specs()
+        self.assertEqual(specs["compute_device"], "cuda")
 
 
 class TestErrorHandling(unittest.TestCase):

@@ -41,6 +41,7 @@ config/production_config.json
 *.key
 *.pem
 .env.*
+!.env.example
 
 # Hugging Face caches
 .huggingface/

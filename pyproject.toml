@@ -10,7 +10,7 @@ readme = "README.md"
 license = { file = "LICENSE" }
 requires-python = ">=3.10"
 authors = [{ name = "SmartEmbedAgent contributors" }]
-keywords = ["embeddings", "agent", "langchain", "claude", "retrieval", "rag", "pii"]
+keywords = ["embeddings", "agent", "langchain", "ollama", "apple-silicon", "retrieval", "rag", "pii"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -34,11 +34,10 @@ full = [
     "transformers>=4.35.0,<5.0.0",
     "tiktoken>=0.5.0,<1.0.0",
     "langchain>=0.1.0,<0.4.0",
-    "langchain-anthropic>=0.1.0,<0.4.0",
+    "langchain-ollama>=0.2.0,<0.4.0",
     "langchain-community>=0.0.10,<0.4.0",
     "duckduckgo-search>=4.0.0,<8.0.0",
     "sentence-transformers>=2.2.0,<4.0.0",
-    "anthropic>=0.18.0,<1.0.0",
 ]
 dev = [
     "black>=24.0.0",

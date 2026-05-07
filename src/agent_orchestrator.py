@@ -3,8 +3,8 @@ SmartEmbedAgent — LangChain Agent Orchestrator
 ==============================================
 
 Wraps the device profiler, PII remover, corpus analyzer, and a cached web
-search tool as LangChain `Tool`s. Drives a Claude-backed (ChatAnthropic)
-agent through a deterministic prescribed workflow:
+search tool as LangChain `Tool`s. Drives a local-LLM-backed agent (Ollama by
+default) through a deterministic prescribed workflow:
 
     1. device_profiler        — hardware constraints
     2. pii_remover            — sanitize the corpus
@@ -332,17 +332,84 @@ Workflow (in this order):
   }
 
 Reasoning principles:
-  - If PII redaction count is high, prefer on-device / open-source models
-    over hosted APIs.
+  - All candidate models are open-source and run locally. Pick the one that
+    best fits the corpus and hardware — don't worry about hosted-API trade-offs.
   - Match the model's context window to the corpus's p95 token length, OR
     chunk. Don't default to the largest model.
-  - On CPU-only hardware, prefer small models (MiniLM, BGE-small) over large
-    transformers.
+  - On CPU-only hardware (compute_device = "cpu"), prefer small models
+    (MiniLM, BGE-small) over large transformers. On accelerated hardware
+    (compute_device in {"cuda", "rocm", "mps"}) larger models like
+    BGE-large, BGE-M3, or mxbai-embed-large are viable; on Apple Silicon
+    (mps) the relevant memory budget is unified RAM, not a separate VRAM
+    figure.
   - Type-token ratio + domain indicators are signals for whether fine-tuning
     on a domain corpus would help.
 
-Be decisive. Do not omit fields from the JSON. Output ONLY the JSON object as
-your final answer."""
+Output format:
+  - Output ONLY the JSON object. No preamble. No markdown code fences.
+  - Do not omit any of the 5 top-level fields.
+  - Do not include explanatory text before or after the JSON."""
+
+
+# ---------------------------------------------------------------------------
+# LLM factory — local Ollama by default; swap point for llama.cpp / MLX
+# ---------------------------------------------------------------------------
+DEFAULT_OLLAMA_MODEL = "hermes3:8b"
+DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
+
+
+def _ollama_pull_hint(model: str, base_url: str) -> str:
+    return (
+        f"Ollama model '{model}' is not available at {base_url}. "
+        f"Start Ollama (`brew install ollama && ollama serve`) and run "
+        f"`ollama pull {model}` to fetch it. "
+        "See README 'Quickstart on Apple Silicon' for full setup."
+    )
+
+
+def build_llm(model: Optional[str] = None, base_url: Optional[str] = None) -> Any:
+    """Construct the default local LLM (ChatOllama).
+
+    Resolution order for parameters: explicit args → env vars
+    (`SMARTEMBED_LLM_MODEL`, `OLLAMA_BASE_URL`) → built-in defaults.
+
+    Verifies that the Ollama server is reachable and that the requested model
+    has been pulled. Raises RuntimeError with the exact `ollama pull` command
+    if not — callers (e.g. main.py) catch this and fall back to the
+    deterministic heuristic so the user still gets a recommendation.
+    """
+    model = model or os.getenv("SMARTEMBED_LLM_MODEL", DEFAULT_OLLAMA_MODEL)
+    base_url = base_url or os.getenv("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL)
+
+    try:
+        from langchain_ollama import ChatOllama
+    except ImportError as e:
+        raise RuntimeError(
+            "langchain-ollama not installed. Run `pip install langchain-ollama` "
+            "or pass `llm=` explicitly to build_agent()."
+        ) from e
+
+    # Verify model availability via Ollama's HTTP API. Avoids a confusing
+    # langchain runtime error later if the server is down or the model is
+    # not pulled. urllib is in the stdlib so no extra dep needed.
+    import urllib.request
+    import urllib.error
+
+    try:
+        with urllib.request.urlopen(f"{base_url}/api/tags", timeout=2) as resp:
+            tags = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise RuntimeError(
+            f"Ollama server not reachable at {base_url}: {e}. "
+            f"Start it with `ollama serve` and run `ollama pull {model}`."
+        ) from e
+
+    available = {m.get("name", "") for m in tags.get("models", [])}
+    # Ollama tags include the implicit ":latest" suffix when missing.
+    if model not in available and f"{model}:latest" not in available:
+        raise RuntimeError(_ollama_pull_hint(model, base_url))
+
+    return ChatOllama(model=model, temperature=0, base_url=base_url)
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +434,9 @@ def build_agent(
     user_config : dict, optional
         PII config (whitelist, redaction_list, ner_model).
     llm : BaseLanguageModel, optional
-        Override the default. Default is ChatAnthropic with claude-sonnet-4.
+        Override the default. Default is `build_llm()`, which returns a
+        ChatOllama instance pointed at a local Ollama server (Apple Silicon
+        Metal-accelerated).
     cache_path : Path, optional
         Where to store the web-search cache. Default `.cache/agent_search.json`.
     cache_ttl_seconds : int
@@ -384,20 +453,8 @@ def build_agent(
     from langchain.tools import StructuredTool
     from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
-    # LLM: default to Claude (ChatAnthropic) per spec.
     if llm is None:
-        try:
-            from langchain_anthropic import ChatAnthropic
-
-            llm = ChatAnthropic(
-                model="claude-sonnet-4-6",
-                temperature=0,
-            )
-        except ImportError as e:
-            raise RuntimeError(
-                "langchain-anthropic not installed. Either `pip install "
-                "langchain-anthropic` or pass `llm=` explicitly."
-            ) from e
+        llm = build_llm()
 
     # Cache + web search.
     cache_path = cache_path or Path(".cache") / "agent_search.json"
@@ -501,7 +558,8 @@ def synthesize_heuristic_recommendation(ctx: AgentContext) -> Dict[str, Any]:
     p95_tokens = int(analysis.get("token_stats", {}).get("max", 0))
     chunking_needed = bool(analysis.get("chunking_needed"))
 
-    # Candidate model pool with rough requirements.
+    # Candidate model pool — open-source only, all run locally on Apple Silicon
+    # via sentence-transformers / transformers with MPS acceleration.
     candidates: List[Tuple[str, int, str, bool]] = [
         # (name, ctx_window, footprint, requires_gpu_for_speed)
         ("sentence-transformers/all-MiniLM-L6-v2", 256, "tiny (~80 MB)", False),
@@ -509,17 +567,27 @@ def synthesize_heuristic_recommendation(ctx: AgentContext) -> Dict[str, Any]:
         ("BAAI/bge-small-en-v1.5", 512, "small (~130 MB)", False),
         ("BAAI/bge-large-en-v1.5", 512, "large (~1.3 GB)", True),
         ("intfloat/e5-large-v2", 512, "large (~1.3 GB)", True),
-        ("openai/text-embedding-3-small", 8191, "hosted API", False),
-        ("openai/text-embedding-3-large", 8191, "hosted API", False),
+        ("nomic-ai/nomic-embed-text-v1.5", 8192, "medium (~550 MB)", False),
+        ("BAAI/bge-m3", 8192, "large (~2.3 GB)", True),
+        ("mixedbread-ai/mxbai-embed-large-v1", 512, "large (~1.3 GB)", True),
     ]
 
-    # Privacy filter: if PII volume is high, drop hosted models.
+    # Privacy filter: every candidate is on-device / open-source, so this is a
+    # no-op today — kept so the heuristic still records the privacy posture
+    # and stays compatible with future hosted-model additions.
     privacy_sensitive = pii_count >= 5
     if privacy_sensitive:
         candidates = [c for c in candidates if "hosted" not in c[2]]
 
-    # Hardware filter: if no GPU, drop large models that need one for speed.
-    if not has_gpu or gpu_mem < 4.0:
+    # Hardware filter: drop GPU-hungry models only on truly compute-light hosts.
+    # MPS (Apple Silicon Metal) counts as GPU acceleration, even though it
+    # doesn't expose a discrete VRAM number — it shares unified memory.
+    compute_device = str(specs.get("compute_device", "cpu"))
+    has_accelerator = compute_device in {"cuda", "rocm", "mps"} and (
+        compute_device == "mps" or has_gpu
+    )
+    sufficient_memory = (compute_device == "mps" and ram >= 16.0) or gpu_mem >= 4.0
+    if not (has_accelerator and sufficient_memory):
         candidates = [c for c in candidates if not c[3]]
 
     # Score: prefer models whose context window is close to (but at least)
@@ -584,9 +652,16 @@ def synthesize_heuristic_recommendation(ctx: AgentContext) -> Dict[str, Any]:
             "perform well; revisit only if retrieval quality is poor."
         )
 
+    if compute_device == "mps":
+        accel_desc = f"Apple Silicon ({specs.get('gpu_name', 'Apple GPU')}) with {ram} GB unified memory. "
+    elif has_gpu:
+        accel_desc = f"GPU: {specs.get('gpu_name')} with {gpu_mem} GB VRAM. "
+    else:
+        accel_desc = "CPU-only. "
+
     hardware_fit_analysis = (
         f"Total RAM: {ram} GB. "
-        + (f"GPU: {specs.get('gpu_name')} with {gpu_mem} GB. " if has_gpu else "CPU-only. ")
+        + accel_desc
         + f"Top recommendation '{ranked[0][0]}' is {ranked[0][2]} — fits comfortably."
         if ranked
         else "No candidate model passed the hardware/privacy filters."

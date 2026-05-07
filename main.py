@@ -11,15 +11,16 @@ Run from the command line:
 The script:
   1. Loads and validates the user config.
   2. Loads the corpus (txt / csv / json supported, plus directory-of-txt).
-  3. Initializes the LangChain agent.
-  4. Runs the full pipeline (or the deterministic fallback if no API key).
+  3. Initializes the LangChain agent (Ollama-backed, runs locally).
+  4. Runs the full pipeline (or the deterministic fallback if Ollama is
+     unreachable or the model isn't pulled).
   5. Writes the recommendation as JSON and as a human-readable Markdown
      report alongside it.
 
 Errors that are usually recoverable (missing files, invalid corpus formats,
-GPU detection failures, NER model failures, LLM API failures) are caught
-with informative messages rather than raw tracebacks. LLM API calls have a
-small retry-with-backoff loop so transient errors don't fail the whole run.
+GPU detection failures, NER model failures, LLM failures) are caught with
+informative messages rather than raw tracebacks. LLM calls have a small
+retry-with-backoff loop so transient errors don't fail the whole run.
 """
 
 from __future__ import annotations
@@ -28,7 +29,6 @@ import argparse
 import csv
 import json
 import logging
-import os
 import sys
 import time
 import traceback
@@ -250,7 +250,11 @@ def render_markdown_report(rec: Dict[str, Any], reasoning_trace: Optional[str] =
 def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(
         prog="smart-embed-agent",
-        description="Recommend an embedding model and chunking strategy for a corpus.",
+        description=(
+            "Recommend an embedding model and chunking strategy for a corpus. "
+            "Uses a local Ollama LLM (default: hermes3:8b) for agentic reasoning; "
+            "falls back to a deterministic heuristic if Ollama is unreachable."
+        ),
     )
     p.add_argument("--corpus_path", required=True, help="Path to corpus file (.txt, .csv, .json) or directory of .txt files.")
     p.add_argument("--config_path", required=True, help="Path to user config JSON.")
@@ -258,7 +262,7 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                    help="Where to write the JSON recommendation. A .md report is written alongside.")
     p.add_argument("--verbose", action="store_true", help="Enable debug-level logging.")
     p.add_argument("--no_llm", action="store_true",
-                   help="Skip the LLM step and use the deterministic heuristic. Useful for CI.")
+                   help="Skip the local LLM and use the deterministic heuristic. Useful for CI or when Ollama isn't installed.")
     p.add_argument("--schema", default=str(DEFAULT_SCHEMA_PATH), help="Config schema path.")
     return p.parse_args(argv)
 
@@ -303,13 +307,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 2
 
     # Step 3 + 4: build agent and run pipeline.
-    use_llm = not args.no_llm and bool(os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("OPENAI_API_KEY"))
+    use_llm = not args.no_llm
 
     recommendation: Dict[str, Any]
     reasoning_trace: Optional[str] = None
 
     if not use_llm:
-        log.warning("No API key set or --no_llm specified. Running deterministic heuristic pipeline.")
+        log.warning("--no_llm specified. Running deterministic heuristic pipeline.")
         _step_announce(PIPELINE_STEPS[2], total_steps, 2)
         _step_announce(PIPELINE_STEPS[3], total_steps, 3)
         recommendation = run_pipeline_no_llm(corpus, user_config=pii_cfg)
