@@ -40,7 +40,8 @@ PY="$SMARTEMBED_HOME/venv/bin/python3"; \
 "$PY" main.py \
   --corpus_path "<USER_PATH>" \
   --config_path config/sample_config.json \
-  --output_path /tmp/se_recommendation.json > /dev/null 2>&1 && \
+  --output_path /tmp/se_recommendation.json \
+  --no_llm > /dev/null 2>&1 && \
 "$PY" -c "
 import json
 d = json.load(open('/tmp/se_recommendation.json'))
@@ -62,7 +63,7 @@ If the exec returns a non-zero exit and stderr mentions `ModuleNotFoundError: ps
 
 If the user pasted raw text instead of a path, first write it to `/tmp/se_corpus.txt` using the `write` tool, then pass that path.
 
-If the user says "fast" or "no LLM", or if Ollama isn't reachable, append `--no_llm` to skip the agentic step and use the deterministic heuristic instead.
+The command above already passes `--no_llm` because YOU (the OpenClaw agent) are the LLM in this loop — running a second LLM inside `exec` is redundant, slow, and busts the context window. Do not remove the `--no_llm` flag.
 
 ## How to respond — STRICT NO-PLACEHOLDER PROTOCOL
 
