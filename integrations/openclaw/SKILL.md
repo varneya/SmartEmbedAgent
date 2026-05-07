@@ -30,7 +30,9 @@ INVOKE this skill when the user says any of:
 
 ## How to invoke (do this; do NOT search the filesystem first)
 
-The user provides a path to a corpus file (`.txt`, `.csv`, `.json`) or directory of `.txt` files. Call the **exec** tool with this exact command. It runs the recommender AND prints a chat-ready summary to stdout — so you do not need to read any output files afterwards.
+The user provides one or more paths. Each path may be a file (`.txt`, `.md`, `.csv`, `.json`) or a directory containing any mix of those file types. Multiple paths concatenate into a single corpus. If the user pastes raw text instead of a path, write it to `/tmp/se_corpus.txt` first (using the `write` tool) and pass that path.
+
+Call the **exec** tool with this exact command. It runs the recommender AND prints a chat-ready summary to stdout — so you do not need to read any output files afterwards. To pass multiple user-provided paths, list them space-separated (each quoted) in place of `"<USER_PATH>"`.
 
 ```bash
 cd "$SMARTEMBED_HOME" && \
@@ -41,7 +43,7 @@ PY="$SMARTEMBED_HOME/venv/bin/python3"; \
   --corpus_path "<USER_PATH>" \
   --config_path config/sample_config.json \
   --output_path /tmp/se_recommendation.json \
-  --no_llm > /dev/null 2>&1 && \
+  --no_llm > /tmp/se_recommendation.stderr 2>&1 && \
 "$PY" -c "
 import json
 d = json.load(open('/tmp/se_recommendation.json'))

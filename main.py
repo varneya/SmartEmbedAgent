@@ -91,65 +91,100 @@ def _step_announce(step: Step, total: int, idx: int) -> None:
 # ---------------------------------------------------------------------------
 # Corpus loading — txt, csv, json, or directory of .txt
 # ---------------------------------------------------------------------------
-def load_corpus(path: Path) -> str:
-    """Load a corpus from disk, returning a single joined string. Documents
-    are joined with double newlines so the corpus analyzer's blank-line
-    splitting recovers them as separate documents."""
+TEXT_SUFFIXES = {".txt", ".md"}
+KNOWN_SUFFIXES = TEXT_SUFFIXES | {".csv", ".json"}
+
+
+def _load_text_file(path: Path) -> str:
+    return path.read_text(encoding="utf-8")
+
+
+def _load_csv(path: Path) -> str:
+    with path.open("r", encoding="utf-8", newline="") as f:
+        rows = list(csv.reader(f))
+    if not rows:
+        raise ValueError(f"CSV is empty: {path}")
+    header = rows[0]
+    data_rows = rows[1:] if any(c.lower() in {"text", "content", "body"} for c in header) else rows
+    return "\n\n".join(" ".join(c for c in row if c) for row in data_rows)
+
+
+def _load_json(path: Path) -> str:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if isinstance(data, list):
+        docs: List[str] = []
+        for item in data:
+            if isinstance(item, str):
+                docs.append(item)
+            elif isinstance(item, dict):
+                for key in ("text", "content", "body"):
+                    if key in item:
+                        docs.append(str(item[key]))
+                        break
+        if not docs:
+            raise ValueError(f"JSON list contains no usable documents: {path}")
+        return "\n\n".join(docs)
+    if isinstance(data, dict):
+        for key in ("text", "content", "body", "documents"):
+            if key in data:
+                val = data[key]
+                if isinstance(val, str):
+                    return val
+                if isinstance(val, list):
+                    return "\n\n".join(str(v) for v in val)
+        raise ValueError(f"JSON object has no recognized text field: {path}")
+    raise ValueError(f"Unsupported JSON shape in {path}")
+
+
+def _load_one_file(path: Path) -> str:
+    suffix = path.suffix.lower()
+    if suffix in TEXT_SUFFIXES:
+        return _load_text_file(path)
+    if suffix == ".csv":
+        return _load_csv(path)
+    if suffix == ".json":
+        return _load_json(path)
+    raise ValueError(f"Unsupported corpus format: {suffix} ({path})")
+
+
+def _load_directory(path: Path) -> str:
+    files = sorted(c for c in path.iterdir() if c.is_file() and c.suffix.lower() in KNOWN_SUFFIXES)
+    if not files:
+        raise ValueError(f"Directory contains no supported files (.txt/.md/.csv/.json): {path}")
+    docs: List[str] = []
+    for f in files:
+        try:
+            docs.append(_load_one_file(f))
+        except (ValueError, json.JSONDecodeError) as e:
+            log.warning("Skipping unparseable file %s in directory: %s", f.name, e)
+    if not docs:
+        raise ValueError(f"Directory {path} had supported file types but none were parseable.")
+    return "\n\n".join(docs)
+
+
+def _load_path(path: Path) -> str:
     path = path.expanduser()
     if not path.exists():
-        raise FileNotFoundError(f"Corpus file not found: {path}")
-
+        raise FileNotFoundError(f"Corpus path not found: {path}")
     if path.is_dir():
-        docs: List[str] = []
-        for child in sorted(path.glob("*.txt")):
-            docs.append(child.read_text(encoding="utf-8"))
-        if not docs:
-            raise ValueError(f"Directory contains no .txt files: {path}")
-        return "\n\n".join(docs)
+        return _load_directory(path)
+    if path.is_file():
+        return _load_one_file(path)
+    raise ValueError(f"Path is neither file nor directory: {path}")
 
-    suffix = path.suffix.lower()
-    if suffix == ".txt":
-        return path.read_text(encoding="utf-8")
 
-    if suffix == ".csv":
-        with path.open("r", encoding="utf-8", newline="") as f:
-            reader = csv.reader(f)
-            rows = list(reader)
-        if not rows:
-            raise ValueError(f"CSV is empty: {path}")
-        # Join all cells of all data rows (skip header if present).
-        header = rows[0]
-        data_rows = rows[1:] if any(c.lower() in {"text", "content", "body"} for c in header) else rows
-        return "\n\n".join(" ".join(c for c in row if c) for row in data_rows)
+def load_corpus(paths) -> str:
+    """Load a corpus from disk, returning a single joined string. Documents
+    are joined with double newlines so the corpus analyzer's blank-line
+    splitting recovers them as separate documents.
 
-    if suffix == ".json":
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if isinstance(data, list):
-            # List of strings or list of {"text": "..."} objects.
-            docs = []
-            for item in data:
-                if isinstance(item, str):
-                    docs.append(item)
-                elif isinstance(item, dict):
-                    for key in ("text", "content", "body"):
-                        if key in item:
-                            docs.append(str(item[key]))
-                            break
-            if not docs:
-                raise ValueError(f"JSON list contains no usable documents: {path}")
-            return "\n\n".join(docs)
-        if isinstance(data, dict):
-            for key in ("text", "content", "body", "documents"):
-                if key in data:
-                    val = data[key]
-                    if isinstance(val, str):
-                        return val
-                    if isinstance(val, list):
-                        return "\n\n".join(str(v) for v in val)
-            raise ValueError(f"JSON object has no recognized text field: {path}")
-        raise ValueError(f"Unsupported JSON shape in {path}")
-
-    raise ValueError(f"Unsupported corpus format: {suffix}")
+    Accepts a single Path/str or a list of Paths/strs. Each path may point
+    to a file (.txt/.md/.csv/.json) or to a directory containing any mix of
+    those file types.
+    """
+    if isinstance(paths, (str, Path)):
+        paths = [paths]
+    return "\n\n".join(_load_path(Path(p)) for p in paths)
 
 
 # ---------------------------------------------------------------------------
@@ -257,7 +292,10 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
             "falls back to a deterministic heuristic if Ollama is unreachable."
         ),
     )
-    p.add_argument("--corpus_path", required=True, help="Path to corpus file (.txt, .csv, .json) or directory of .txt files.")
+    p.add_argument("--corpus_path", required=True, nargs="+",
+                   help=("One or more paths to corpus files (.txt, .md, .csv, .json) "
+                         "or directories containing any mix of those types. "
+                         "Multiple paths are concatenated into a single corpus."))
     p.add_argument("--config_path", required=True, help="Path to user config JSON.")
     p.add_argument("--output_path", default="runs/recommendation.json",
                    help="Where to write the JSON recommendation. A .md report is written alongside.")
@@ -301,8 +339,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     # Step 2: load corpus.
     _step_announce(PIPELINE_STEPS[1], total_steps, 1)
     try:
-        corpus = load_corpus(Path(args.corpus_path).expanduser())
-        log.info("Loaded corpus: %d characters.", len(corpus))
+        corpus = load_corpus([Path(p).expanduser() for p in args.corpus_path])
+        log.info("Loaded corpus from %d source(s): %d characters.", len(args.corpus_path), len(corpus))
     except (FileNotFoundError, ValueError) as e:
         log.error("Failed to load corpus: %s", e)
         return 2
