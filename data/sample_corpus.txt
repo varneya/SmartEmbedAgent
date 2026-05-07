@@ -1,0 +1,13 @@
+Quarterly customer feedback report. Compiled by Maria Sanchez (maria.sanchez@acme.com) for Acme Corp leadership review.
+
+Customer John Doe contacted us on March 14, 2026 from his office in Boston, MA. He can be reached at 617-555-0142. His employee record is EMP-204815 and the internal escalation is tracked under TICKET-OPS-4421. The issue centered on Project Falcon — specifically, the export feature was returning empty CSV files for users with more than 10,000 records.
+
+Engineering response from Priya Patel: the root cause was a memory pressure regression introduced in release 4.2. Priya recommended we enable streaming exports for any account exporting >5,000 rows. The fix shipped in 4.2.1 on March 28, 2026.
+
+Sentiment summary across the quarter: customer satisfaction held steady at 4.2/5 despite the export incident. Most negative feedback clustered around onboarding friction rather than reliability — multiple users in the United States and Canada reported confusion with the SSO flow. Internal Codename: Atlas is the working title for the onboarding redesign that addresses this.
+
+Notable customer wins: signed a three-year renewal with a Fortune 500 retailer (details intentionally omitted). Reference customer Nadia Khan at Globex Industries (nkhan@globex.example) agreed to participate in a public case study, contingent on legal review (see ACME-2024-PRIV).
+
+Outstanding action items: (1) finalize the onboarding redesign mockups by April 30, 2026; (2) circulate the updated SSO documentation to all customer-facing teams; (3) close the loop with the four enterprise accounts who escalated during the export outage. Owner for all three: Marcus Lee (marcus.lee@acme.com, 415-555-0193).
+
+Appendix A: full incident timeline available at https://internal.acme.com/incidents/2026-03-export. Appendix B: anonymized survey data is in the shared drive folder linked from the Atlas working group's wiki.

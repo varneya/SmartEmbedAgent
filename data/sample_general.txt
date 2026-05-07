@@ -1,0 +1,21 @@
+Quarterly customer feedback report. Compiled by Maria Sanchez (maria.sanchez@acme.com) for Acme Corp leadership. The team reviewed 1,247 support tickets and 89 product surveys, finding overall satisfaction held steady at 4.2 out of 5.
+
+Customer John Doe contacted us on March 14, 2026 from his office in Boston. He can be reached at 617-555-0142. The issue centered on our export feature returning empty CSV files for accounts with more than 10,000 records. Engineering has flagged this for the next sprint.
+
+Engineering response from Priya Patel: the root cause was a memory pressure regression introduced in release 4.2. Priya recommended we enable streaming exports for any account exporting over 5,000 rows. The fix shipped in 4.2.1 on March 28, 2026.
+
+Sentiment analysis across the quarter: customer satisfaction held steady despite the export incident. Most negative feedback clustered around onboarding friction rather than reliability.
+
+Notable customer wins this quarter: signed a three-year renewal with a Fortune 500 retailer. Reference customer Nadia Khan at Globex Industries (nkhan@globex.example) agreed to participate in a public case study.
+
+Internal product discussions have focused on the upcoming GA release of our streaming pipeline. The team is targeting a launch in Q3 2026, with private beta starting in May for select enterprise customers.
+
+Operations note: the Frankfurt data center upgrade completed without incident on April 2, 2026. All EU-region traffic is now served from the new hardware. Latency improvements averaged 18 percent across the most common API routes.
+
+Marketing campaign retrospective: our LinkedIn lead-generation campaign delivered 312 qualified leads in March, up from 198 in February. CPC dropped from $14.20 to $11.85 as we refined targeting toward mid-market technology companies.
+
+HR update: we extended offers to 14 candidates this quarter, with 11 accepting. Two of the new hires are joining the platform team in Berlin, three are joining customer success in San Francisco, and the remaining six are spread across product, design, and finance.
+
+Legal review of the proposed Acme-Globex partnership is in progress. Our outside counsel expects a draft term sheet by April 22, 2026. Key open questions concern data residency requirements for EU customers and the indemnification cap on shared infrastructure incidents.
+
+Financial highlights: ARR grew 23 percent year-over-year, ending Q1 at $42.8M. Net revenue retention was 118 percent, driven primarily by expansion in our enterprise tier. Gross margin held at 78 percent. Cash runway extends 22 months at the current burn rate.

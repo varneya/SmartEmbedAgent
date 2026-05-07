@@ -1,0 +1,121 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SmartEmbedAgent Configuration Schema",
+  "description": "Top-level configuration for the SmartEmbedAgent. Validates user-provided JSON against documented field names, types, ranges, and enum values.",
+  "type": "object",
+  "required": ["pii_settings", "model_preferences", "hardware_constraints", "agent_settings"],
+  "additionalProperties": true,
+
+  "properties": {
+    "pii_settings": {
+      "type": "object",
+      "description": "Controls how PII is detected and redacted from the corpus.",
+      "required": ["custom_redaction_list", "whitelist", "redaction_aggressiveness", "ner_model_choice"],
+      "additionalProperties": false,
+      "properties": {
+        "custom_redaction_list": {
+          "type": "array",
+          "description": "Strings or regex patterns the user wants force-redacted regardless of detection confidence (e.g. internal codenames, project names).",
+          "items": { "type": "string" }
+        },
+        "whitelist": {
+          "type": "array",
+          "description": "Strings exempt from redaction even if NER or regex flags them. Useful for company names, public figures referenced in policy documents, or terminology NER misclassifies.",
+          "items": { "type": "string" }
+        },
+        "redaction_aggressiveness": {
+          "type": "string",
+          "description": "How aggressively to redact: 'low' = regex only, 'medium' = regex + NER PERSON/LOCATION/ORG, 'high' = medium + ORG + MISC entities + stricter phone/email matching.",
+          "enum": ["low", "medium", "high"]
+        },
+        "ner_model_choice": {
+          "type": "string",
+          "description": "Hugging Face model identifier for the NER step. Default: 'dslim/bert-base-NER'."
+        }
+      }
+    },
+
+    "model_preferences": {
+      "type": "object",
+      "description": "User constraints and preferences on the recommended embedding model.",
+      "required": ["max_model_size_gb", "preferred_model_families", "prioritize_speed_over_accuracy", "target_use_case"],
+      "additionalProperties": false,
+      "properties": {
+        "max_model_size_gb": {
+          "type": "number",
+          "description": "Maximum allowed model size in gigabytes (on-disk weights). Models larger than this are filtered from the candidate pool.",
+          "minimum": 0,
+          "exclusiveMaximum": 1000
+        },
+        "preferred_model_families": {
+          "type": "array",
+          "description": "Ordered list of preferred providers / families, e.g. 'sentence-transformers', 'BAAI', 'mistral', 'qwen', 'openai'. Earlier entries are preferred over later.",
+          "items": { "type": "string" }
+        },
+        "prioritize_speed_over_accuracy": {
+          "type": "boolean",
+          "description": "If true, the agent biases toward smaller, faster models even when a larger model would score higher on retrieval benchmarks."
+        },
+        "target_use_case": {
+          "type": "string",
+          "description": "Primary downstream task, used to pick task-tuned models when available.",
+          "enum": ["semantic_search", "classification", "clustering", "retrieval", "reranking"]
+        }
+      }
+    },
+
+    "hardware_constraints": {
+      "type": "object",
+      "description": "Caps that override what the device profiler discovers. Use these when you want to run on a host but reserve resources for other workloads.",
+      "required": ["max_vram_usage_gb", "max_ram_usage_gb", "allow_gpu", "fallback_to_cpu"],
+      "additionalProperties": false,
+      "properties": {
+        "max_vram_usage_gb": {
+          "type": "number",
+          "description": "Maximum VRAM the agent may assume is available, in GB. Use 0 to forbid GPU usage.",
+          "minimum": 0
+        },
+        "max_ram_usage_gb": {
+          "type": "number",
+          "description": "Maximum system RAM the agent may assume is available, in GB.",
+          "minimum": 0
+        },
+        "allow_gpu": {
+          "type": "boolean",
+          "description": "If false, no GPU model will be recommended even if one is detected."
+        },
+        "fallback_to_cpu": {
+          "type": "boolean",
+          "description": "If GPU is unavailable or insufficient, fall back to CPU-only models. Recommended true."
+        }
+      }
+    },
+
+    "agent_settings": {
+      "type": "object",
+      "description": "Runtime behavior of the orchestrator agent.",
+      "required": ["enable_web_search", "search_cache_days", "llm_model", "verbose_logging"],
+      "additionalProperties": false,
+      "properties": {
+        "enable_web_search": {
+          "type": "boolean",
+          "description": "Allow the agent to query the web for current best practices and benchmarks."
+        },
+        "search_cache_days": {
+          "type": "number",
+          "description": "Search cache TTL in days. Cached entries older than this are re-fetched.",
+          "minimum": 0,
+          "maximum": 365
+        },
+        "llm_model": {
+          "type": "string",
+          "description": "Identifier of the LLM that drives the agent's reasoning step (e.g. 'claude-sonnet-4-6')."
+        },
+        "verbose_logging": {
+          "type": "boolean",
+          "description": "If true, the agent prints its tool-calling trace to stdout."
+        }
+      }
+    }
+  }
+}

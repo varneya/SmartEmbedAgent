@@ -1,0 +1,26 @@
+{
+  "name": "general_qa",
+  "description": "Mixed-domain question/document benchmark with 10 documents and 8 queries.",
+  "documents": [
+    "Distributed systems require explicit reasoning about failure modes including network partitions, slow downstreams, and partial failures. Patterns like circuit breakers and bulkheads isolate damage.",
+    "Embedding models map text to fixed-dimensional vectors. Choices range from compact CPU-friendly models like MiniLM to long-context hosted APIs like OpenAI's text-embedding-3-large.",
+    "Code review hierarchy: architectural fit first, correctness second, readability third, performance fourth, style last. Style should be enforced by tooling.",
+    "Customer feedback this quarter focused on onboarding friction. Engineering response addressed export streaming and the SSO redesign is in progress.",
+    "Financial reporting: ARR grew 23 percent year over year. Net revenue retention was 118 percent. Gross margin held at 78 percent.",
+    "Patient encounter for chronic lower back pain. MRI revealed L4-L5 disc herniation. Conservative management with physical therapy and NSAIDs initiated.",
+    "Marketing campaign delivered 312 leads in March, up from 198 in February. CPC dropped from 14.20 to 11.85 dollars.",
+    "Engineering hire: Welcome Jenna Park to the platform team. She will focus on observability tooling.",
+    "Security update reminder: rotate service-account credentials by end of week. Runbook is in the security-rotations Slack channel.",
+    "Data center upgrade in Frankfurt completed without incident. Latency improvements averaged 18 percent across common API routes."
+  ],
+  "queries": [
+    {"query": "How are distributed system failures handled?", "relevant_doc_indices": [0]},
+    {"query": "What embedding models are available?", "relevant_doc_indices": [1]},
+    {"query": "What's the right priority order in code review?", "relevant_doc_indices": [2]},
+    {"query": "What was customer feedback about?", "relevant_doc_indices": [3]},
+    {"query": "How are revenue metrics looking?", "relevant_doc_indices": [4]},
+    {"query": "What treatment plan was set for the back pain?", "relevant_doc_indices": [5]},
+    {"query": "Did marketing leads improve this month?", "relevant_doc_indices": [6]},
+    {"query": "Who joined the platform team?", "relevant_doc_indices": [7]}
+  ]
+}

@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Project artifacts
+.cache/
+runs/
+logs/
+*.log
+
+# Sensitive files
+config/local_config.json
+config/production_config.json
+*.key
+*.pem
+.env.*
+
+# Hugging Face caches
+.huggingface/
+
+# Jupyter
+.ipynb_checkpoints/

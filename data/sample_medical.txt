@@ -1,0 +1,21 @@
+Patient encounter note for Robert Henderson, DOB 1965-04-12, MRN 8821049. Seen by Dr. Anita Brooks at Cedar Hills Medical Center on 2026-04-03. Chief complaint: persistent lower back pain radiating to right leg for six weeks. Pain rated 7 of 10 at worst. No history of acute trauma. Patient reports difficulty sleeping due to discomfort.
+
+Past medical history: type 2 diabetes diagnosed 2012, well controlled on metformin 1000mg twice daily; hypertension on lisinopril 20mg daily; obesity with BMI 32.4. Family history significant for cardiovascular disease in both parents. No known drug allergies. Patient denies tobacco use; reports two alcoholic drinks per week.
+
+Physical exam: alert and oriented, in mild distress secondary to pain. Lumbar paraspinal tenderness on palpation. Positive straight-leg-raise test on right at 45 degrees. Sensation intact. Strength 5/5 in all major muscle groups. Reflexes 2+ symmetric. Gait antalgic favoring left side.
+
+Imaging review: MRI lumbar spine ordered 2026-03-28 reveals L4-L5 disc herniation with mild right neural foraminal narrowing. No evidence of cauda equina compression. Mild facet arthropathy bilaterally. No fractures or destructive lesions identified.
+
+Assessment and plan: acute on chronic lumbar radiculopathy secondary to L4-L5 disc herniation. Initiating conservative management with physical therapy three times weekly for six weeks, NSAIDs scheduled, and short course of muscle relaxant for nighttime. Will reassess in four weeks; if no improvement, consider epidural steroid injection or surgical referral.
+
+Medication reconciliation: discontinued ibuprofen 400mg PRN per patient report of GI upset. Started naproxen 500mg twice daily with meals. Continue metformin and lisinopril unchanged. Cyclobenzaprine 5mg at bedtime as needed for muscle spasm, max five days.
+
+Patient education: discussed importance of activity modification, proper lifting mechanics, and weight management for symptom relief and prevention of recurrence. Provided handout on lumbar stabilization exercises. Patient verbalized understanding and agreement with plan. Encouraged to call clinic at 555-0188 if symptoms worsen.
+
+Lab review from 2026-03-15: HbA1c 6.8 percent, eGFR 78, lipid panel within normal limits, CBC unremarkable. Patient is due for diabetic retinopathy screening; will refer to ophthalmology. Consider scheduling colonoscopy given age-appropriate screening guidelines.
+
+Care coordination: physical therapy referral sent to Eastside Rehab. Patient prefers afternoon appointments. Insurance preauthorization not required for initial six-week course. Follow-up appointment scheduled for 2026-05-01 to assess response to conservative management.
+
+Mental health screening: PHQ-9 score 4 out of 27, suggesting minimal depressive symptoms. Patient reports adequate social support from spouse and adult children. No active suicidal ideation. Will continue to monitor at follow-up visits given chronic pain comorbidity risk.
+
+Clinical decision support flagged the patient for cardiovascular risk assessment given family history and current weight. ASCVD risk calculated at 12.3 percent ten-year risk. Discussed lifestyle modifications and confirmed continued statin therapy is not indicated at this time per current guidelines. Will reassess annually.

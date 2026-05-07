@@ -1,0 +1,41 @@
+{
+  "_comment": "SmartEmbedAgent — sample user configuration. Top-level groups: pii_settings, model_preferences, hardware_constraints, agent_settings. See docs/CONFIG_GUIDE.md for full field documentation.",
+
+  "pii_settings": {
+    "custom_redaction_list": [
+      "Project Falcon",
+      "Internal Codename: Atlas",
+      "ACME-2024-PRIV"
+    ],
+    "whitelist": [
+      "Acme Corp",
+      "OpenAI",
+      "United States",
+      "Python",
+      "GitHub"
+    ],
+    "redaction_aggressiveness": "medium",
+    "ner_model_choice": "dslim/bert-base-NER"
+  },
+
+  "model_preferences": {
+    "max_model_size_gb": 2.0,
+    "preferred_model_families": ["sentence-transformers", "BAAI"],
+    "prioritize_speed_over_accuracy": false,
+    "target_use_case": "semantic_search"
+  },
+
+  "hardware_constraints": {
+    "max_vram_usage_gb": 8.0,
+    "max_ram_usage_gb": 16.0,
+    "allow_gpu": true,
+    "fallback_to_cpu": true
+  },
+
+  "agent_settings": {
+    "enable_web_search": true,
+    "search_cache_days": 1,
+    "llm_model": "claude-sonnet-4-6",
+    "verbose_logging": true
+  }
+}

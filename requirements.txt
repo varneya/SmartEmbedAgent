@@ -1,0 +1,21 @@
+# Core dependencies — pinned to ranges that have been tested together.
+psutil>=5.9.0,<6.0.0
+pydantic>=2.0.0,<3.0.0
+
+# ML / tokenization
+torch>=2.0.0,<3.0.0
+transformers>=4.35.0,<5.0.0
+sentence-transformers>=2.2.0,<4.0.0
+tiktoken>=0.5.0,<1.0.0
+numpy>=1.24.0,<3.0.0
+
+# LangChain agent stack
+langchain>=0.1.0,<0.4.0
+langchain-anthropic>=0.1.0,<0.4.0
+langchain-openai>=0.0.5,<0.4.0
+langchain-community>=0.0.10,<0.4.0
+anthropic>=0.18.0,<1.0.0
+
+# Web search backend
+duckduckgo-search>=4.0.0,<8.0.0
+
