@@ -64,11 +64,21 @@ If the user pasted raw text instead of a path, first write it to `/tmp/se_corpus
 
 If the user says "fast" or "no LLM", or if Ollama isn't reachable, append `--no_llm` to skip the agentic step and use the deterministic heuristic instead.
 
-## How to respond — RELAY EXEC STDOUT VERBATIM
+## How to respond — STRICT NO-PLACEHOLDER PROTOCOL
 
-The exec command above already prints the formatted summary (🧭 ⚙️ 💾 🎯 lines) on stdout. **Send that stdout to the user as-is.** Do NOT paraphrase. Do NOT substitute model names. Do NOT add a "standard hardware" sentence. Do NOT call read on /tmp/se_recommendation.json — the values you need are already in the exec stdout.
+Required ordering:
 
-You may add ONE optional closing line: *"Want me to read back the full Markdown report?"*
+1. Do NOT send any text message before calling exec. No "Running…", no "🔄 Processing…", no "Please wait…", no acknowledgment of any kind. The user is on a chat app — every message you send is delivered as a separate notification, and a placeholder followed by silence is worse than no reply.
+2. Call exec with the command above. Wait for it to complete.
+3. Send EXACTLY ONE reply containing the exec stdout, verbatim. The exec output already has the four 🧭 ⚙️ 💾 🎯 lines plus the closing markdown-report line — copy it through unchanged.
+
+Forbidden behaviors:
+- Sending a placeholder text payload, then calling exec. (Wrong order — chat user sees only the placeholder if your turn ends before exec finishes.)
+- Paraphrasing the exec stdout. (Use the model names, chunk sizes, hardware string, and fine-tuning advice exactly as printed.)
+- Calling read on /tmp/se_recommendation.json. (The values are already in stdout.)
+- Adding a "Standard hardware" sentence or any other content not present in stdout.
+
+You may append ONE optional follow-up line at the very end: *"Want me to read back the full Markdown report?"*
 
 Keep the entire reply under ~1500 chars (chat-friendly).
 
