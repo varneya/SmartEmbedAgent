@@ -126,6 +126,9 @@ class CorpusAnalysis:
     domain_indicators: List[Dict[str, Any]]
     tokenizer_used: str = ""
     notes: List[str] = field(default_factory=list)
+    # Language profile: dominant language(s), and a multilingual flag the
+    # recommender uses to prefer multilingual embedding models when set.
+    language_profile: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -146,9 +149,26 @@ def _split_corpus(corpus: Union[str, List[str]]) -> List[str]:
     raise TypeError(f"Corpus must be str or list[str], got {type(corpus).__name__}")
 
 
+def _percentile(sorted_counts: List[int], p: float) -> float:
+    """Linear-interpolated percentile on a pre-sorted list. p in [0, 100]."""
+    if not sorted_counts:
+        return 0.0
+    if len(sorted_counts) == 1:
+        return float(sorted_counts[0])
+    rank = (p / 100.0) * (len(sorted_counts) - 1)
+    lo = int(math.floor(rank))
+    hi = int(math.ceil(rank))
+    if lo == hi:
+        return float(sorted_counts[lo])
+    frac = rank - lo
+    return sorted_counts[lo] + (sorted_counts[hi] - sorted_counts[lo]) * frac
+
+
 def _token_stats(counts: List[int]) -> Dict[str, float]:
     if not counts:
-        return {"total": 0, "mean": 0.0, "median": 0.0, "min": 0, "max": 0, "std": 0.0}
+        return {"total": 0, "mean": 0.0, "median": 0.0, "min": 0, "max": 0, "std": 0.0,
+                "p50": 0.0, "p95": 0.0, "p99": 0.0}
+    sorted_counts = sorted(counts)
     return {
         "total": sum(counts),
         "mean": round(statistics.mean(counts), 2),
@@ -156,6 +176,11 @@ def _token_stats(counts: List[int]) -> Dict[str, float]:
         "min": min(counts),
         "max": max(counts),
         "std": round(statistics.pstdev(counts), 2) if len(counts) > 1 else 0.0,
+        # Percentiles drive chunking decisions much more reliably than the
+        # mean — a corpus with mean=100 but p95=4000 still needs chunking.
+        "p50": round(_percentile(sorted_counts, 50), 2),
+        "p95": round(_percentile(sorted_counts, 95), 2),
+        "p99": round(_percentile(sorted_counts, 99), 2),
     }
 
 
@@ -209,6 +234,119 @@ def _domain_indicators(
                 continue
             counts[w] += 1
     return [{"term": term, "frequency": freq} for term, freq in counts.most_common(top_k)]
+
+
+def _detect_language_profile(documents: List[str], sample_n: int = 60) -> Dict[str, Any]:
+    """Detect dominant language(s) over a sample of documents.
+
+    Uses `langdetect` if available; falls back to a script-based heuristic
+    (Devanagari / Tamil / Bengali / etc.) so we still flag obvious
+    non-Latin-script content even without the optional dep.
+
+    Returns:
+        {
+          "languages": [{"code": "en", "share": 0.82}, {"code": "hi", "share": 0.12}, ...],
+          "multilingual": bool,   # True if >1 language >5% share
+          "non_latin_present": bool,
+          "detector": "langdetect" | "script-heuristic" | "none"
+        }
+    """
+    if not documents:
+        return {"languages": [], "multilingual": False, "non_latin_present": False, "detector": "none"}
+
+    # Sample evenly across the corpus rather than the first N docs (which on
+    # multi-source corpora would all come from the first source).
+    n = len(documents)
+    step = max(1, n // sample_n)
+    sample = documents[::step][:sample_n]
+
+    # Quick script check is always cheap and useful even when langdetect is
+    # available — caches the "non-Latin-present" signal independently.
+    non_latin_present = any(
+        any(_is_non_latin_script(ch) for ch in doc[:500])
+        for doc in sample
+    )
+
+    detector = "none"
+    counts: Counter[str] = Counter()
+    try:
+        from langdetect import detect_langs, DetectorFactory
+        DetectorFactory.seed = 0
+        detector = "langdetect"
+        for doc in sample:
+            text = doc.strip()
+            if len(text) < 30:
+                continue
+            try:
+                langs = detect_langs(text)
+                if langs:
+                    # Take only the top language per doc; weighting by
+                    # confidence inflates noise on short or mixed docs.
+                    counts[langs[0].lang] += 1
+            except Exception:
+                continue
+    except ImportError:
+        # Script-only fallback: Latin / Devanagari / etc. classifications.
+        detector = "script-heuristic"
+        for doc in sample:
+            counts[_dominant_script(doc[:500])] += 1
+
+    total = sum(counts.values()) or 1
+    languages = [
+        {"code": code, "share": round(c / total, 3)}
+        for code, c in counts.most_common()
+    ]
+    multilingual = sum(1 for L in languages if L["share"] >= 0.05) > 1
+
+    return {
+        "languages": languages,
+        "multilingual": multilingual,
+        "non_latin_present": non_latin_present,
+        "detector": detector,
+    }
+
+
+def _is_non_latin_script(ch: str) -> bool:
+    o = ord(ch)
+    # Devanagari (Hindi, Marathi), Tamil, Telugu, Kannada, Bengali, Gurmukhi,
+    # Gujarati, Malayalam, Oriya, plus CJK and Arabic — broad enough for the
+    # multilingual flag without enumerating every block.
+    return (
+        0x0900 <= o <= 0x097F or  # Devanagari
+        0x0980 <= o <= 0x09FF or  # Bengali
+        0x0A00 <= o <= 0x0A7F or  # Gurmukhi
+        0x0A80 <= o <= 0x0AFF or  # Gujarati
+        0x0B00 <= o <= 0x0B7F or  # Oriya
+        0x0B80 <= o <= 0x0BFF or  # Tamil
+        0x0C00 <= o <= 0x0C7F or  # Telugu
+        0x0C80 <= o <= 0x0CFF or  # Kannada
+        0x0D00 <= o <= 0x0D7F or  # Malayalam
+        0x0600 <= o <= 0x06FF or  # Arabic
+        0x4E00 <= o <= 0x9FFF or  # CJK Unified
+        0x3040 <= o <= 0x30FF      # Hiragana / Katakana
+    )
+
+
+def _dominant_script(text: str) -> str:
+    """Crude script classifier for the langdetect-less fallback path."""
+    latin = devanagari = tamil = bengali = cjk = arabic = 0
+    for ch in text:
+        o = ord(ch)
+        if 0x0041 <= o <= 0x007A:
+            latin += 1
+        elif 0x0900 <= o <= 0x097F:
+            devanagari += 1
+        elif 0x0B80 <= o <= 0x0BFF:
+            tamil += 1
+        elif 0x0980 <= o <= 0x09FF:
+            bengali += 1
+        elif 0x4E00 <= o <= 0x9FFF:
+            cjk += 1
+        elif 0x0600 <= o <= 0x06FF:
+            arabic += 1
+    counts = {"latin": latin, "devanagari": devanagari, "tamil": tamil,
+              "bengali": bengali, "cjk": cjk, "arabic": arabic}
+    return max(counts, key=counts.get) if any(counts.values()) else "unknown"
 
 
 def _decide_chunking(
@@ -295,6 +433,8 @@ def analyze_corpus(
             domain_indicators=[],
             tokenizer_used="",
             notes=notes,
+            language_profile={"languages": [], "multilingual": False,
+                              "non_latin_present": False, "detector": "none"},
         )
 
     tokenizer = _Tokenizer(tokenizer_name)
@@ -317,6 +457,15 @@ def analyze_corpus(
             "chunking decisions or truncation."
         )
 
+    language_profile = _detect_language_profile(documents)
+    if language_profile.get("multilingual"):
+        notes.append(
+            f"Multilingual corpus detected ({language_profile['languages']}). "
+            "Recommender will prefer multilingual embedding models."
+        )
+    elif language_profile.get("non_latin_present"):
+        notes.append("Non-Latin script content detected; multilingual model recommended.")
+
     return CorpusAnalysis(
         doc_count=len(documents),
         token_stats=_token_stats(counts),
@@ -328,6 +477,7 @@ def analyze_corpus(
         domain_indicators=_domain_indicators(documents),
         tokenizer_used=tokenizer.kind(),
         notes=notes,
+        language_profile=language_profile,
     )
 
 

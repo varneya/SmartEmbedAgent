@@ -239,6 +239,18 @@ def render_markdown_report(rec: Dict[str, Any], reasoning_trace: Optional[str] =
             entry.get("rationale", "_No rationale._"),
             "",
         ]
+        # Surface prefix templates if the model uses them — most retrieval
+        # quality losses with bge/nomic/e5 come from forgetting these.
+        ep = entry.get("embed_prefix", "")
+        qp = entry.get("query_prefix", "")
+        if ep or qp:
+            lines += [
+                "**Prompt prefixes (apply at index/query time):**",
+                "",
+                f"- Index documents with: `{ep!r}`",
+                f"- Query embeddings with: `{qp!r}`",
+                "",
+            ]
 
     # Chunking strategy.
     cs = rec.get("chunking_strategy", {})
@@ -265,6 +277,47 @@ def render_markdown_report(rec: Dict[str, Any], reasoning_trace: Optional[str] =
 
     # Hardware fit.
     lines += ["## Hardware Fit Analysis", "", rec.get("hardware_fit_analysis", "_No analysis provided._"), ""]
+
+    # Index estimate (NEW).
+    ix = rec.get("index_estimate") or {}
+    if ix:
+        lines += [
+            "## Index & Throughput Estimate",
+            "",
+            f"- **Vector dim:** {ix.get('vector_dim')}",
+            f"- **Index size (full corpus, float32):** {ix.get('index_size_human')}",
+            f"- **Embedding throughput:** ~{ix.get('embed_throughput_docs_per_sec')} docs/sec",
+            f"- **Estimated full-corpus embed time:** ~{ix.get('estimated_full_embed_seconds')} seconds",
+            f"- **Estimated query-embed latency:** ~{ix.get('estimated_query_embed_ms')} ms",
+            "",
+        ]
+
+    # Reranker recommendation (NEW).
+    rr = rec.get("reranker_recommendation") or {}
+    if rr.get("name"):
+        lines += [
+            "## Reranker Recommendation",
+            "",
+            f"**Suggested:** `{rr['name']}` (~{rr.get('size_mb')} MB)",
+            "",
+            rr.get("why", ""),
+            "",
+        ]
+
+    # Language profile (NEW).
+    lp = rec.get("language_profile") or {}
+    langs = lp.get("languages") or []
+    if langs:
+        lang_str = ", ".join(f"`{L['code']}` ({L['share']:.0%})" for L in langs[:5])
+        flag = " — multilingual" if lp.get("multilingual") else ""
+        lines += [
+            "## Language Profile",
+            "",
+            f"- **Detected:** {lang_str}{flag}",
+            f"- **Non-Latin script present:** {'yes' if lp.get('non_latin_present') else 'no'}",
+            f"- **Detector:** `{lp.get('detector', 'none')}`",
+            "",
+        ]
 
     # Full reasoning trace.
     if reasoning_trace:

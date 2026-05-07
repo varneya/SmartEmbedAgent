@@ -49,11 +49,28 @@ import json
 d = json.load(open('/tmp/se_recommendation.json'))
 top = d['recommended_models'][0]
 cs = d['chunking_strategy']
+ix = d.get('index_estimate', {}) or {}
+rr = d.get('reranker_recommendation', {}) or {}
+lp = d.get('language_profile', {}) or {}
 chunk_line = f\"{cs['chunk_size_tokens']} tokens chunk size, {cs['overlap_tokens']} tokens overlap\" if cs['needed'] else 'not needed'
-print(f\"🧭 Top: {top['name']} — {top['rationale']}\")
+prefix_line = ''
+if top.get('embed_prefix') or top.get('query_prefix'):
+    prefix_line = f\"\\n  📝 Prefixes — index docs with {top['embed_prefix']!r}, queries with {top['query_prefix']!r}\"
+lang_line = ''
+langs = lp.get('languages') or []
+if langs:
+    lang_line = '\\n📚 Language: ' + (', '.join(f\"{L['code']} ({L['share']:.0%})\" for L in langs[:3]))
+    if lp.get('multilingual'): lang_line += ' (multilingual — preferred multilingual embedders)'
+print(f\"🧭 Top: {top['name']} — {top['rationale']}{prefix_line}\")
 print(f\"⚙️ Chunking: {'yes' if cs['needed'] else 'no'}. {chunk_line}\")
 print(f\"💾 Hardware: {d['hardware_fit_analysis']}\")
 print(f\"🎯 Fine-tuning: {d['fine_tuning_advice']}\")
+if ix:
+    print(f\"📊 Index estimate: {ix.get('index_size_human')} (dim {ix.get('vector_dim')}); embed full corpus ~{ix.get('estimated_full_embed_seconds')}s; query embed ~{ix.get('estimated_query_embed_ms')}ms\")
+if rr.get('name'):
+    print(f\"🎚️ Reranker: {rr['name']} (~{rr.get('size_mb')} MB) — {rr.get('why', '').split('.')[0]}.\")
+if lang_line:
+    print(lang_line)
 print()
 print('Full Markdown report at /tmp/se_recommendation.md')
 "

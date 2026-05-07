@@ -543,6 +543,125 @@ def run_pipeline_no_llm(
     return synthesize_heuristic_recommendation(_CONTEXT)
 
 
+# Embedding-model catalogue. Each entry carries the metadata the recommender
+# needs to (1) match the corpus's language and length profile, (2) print the
+# right index/throughput estimates, and (3) emit the literal prompt prefixes
+# a user must prepend during embedding.
+#
+# Field reference:
+#   dim                : embedding dimension (drives index size estimate)
+#   ctx_window         : max tokens per input
+#   size_mb            : approximate on-disk model size
+#   multilingual       : True if the model is trained for >1 language
+#   requires_gpu_for_speed : True if CPU-only inference is too slow for prod
+#   embed_prefix       : string to prepend when embedding documents (corpus side)
+#   query_prefix       : string to prepend when embedding queries (asymmetric models)
+#   throughput_docs_per_sec : rough CPU vs MPS rates ({"cpu": int, "mps": int})
+EMBEDDING_CATALOGUE: List[Dict[str, Any]] = [
+    {"name": "sentence-transformers/all-MiniLM-L6-v2", "dim": 384, "ctx_window": 256,
+     "size_mb": 80, "multilingual": False, "requires_gpu_for_speed": False,
+     "embed_prefix": "", "query_prefix": "",
+     "throughput_docs_per_sec": {"cpu": 200, "mps": 600}},
+    {"name": "sentence-transformers/all-mpnet-base-v2", "dim": 768, "ctx_window": 384,
+     "size_mb": 420, "multilingual": False, "requires_gpu_for_speed": False,
+     "embed_prefix": "", "query_prefix": "",
+     "throughput_docs_per_sec": {"cpu": 60, "mps": 250}},
+    {"name": "sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
+     "dim": 768, "ctx_window": 128, "size_mb": 970, "multilingual": True,
+     "requires_gpu_for_speed": False,
+     "embed_prefix": "", "query_prefix": "",
+     "throughput_docs_per_sec": {"cpu": 50, "mps": 220}},
+    {"name": "BAAI/bge-small-en-v1.5", "dim": 384, "ctx_window": 512,
+     "size_mb": 130, "multilingual": False, "requires_gpu_for_speed": False,
+     "embed_prefix": "",
+     "query_prefix": "Represent this sentence for searching relevant passages: ",
+     "throughput_docs_per_sec": {"cpu": 150, "mps": 500}},
+    {"name": "BAAI/bge-large-en-v1.5", "dim": 1024, "ctx_window": 512,
+     "size_mb": 1300, "multilingual": False, "requires_gpu_for_speed": True,
+     "embed_prefix": "",
+     "query_prefix": "Represent this sentence for searching relevant passages: ",
+     "throughput_docs_per_sec": {"cpu": 15, "mps": 80}},
+    {"name": "intfloat/e5-large-v2", "dim": 1024, "ctx_window": 512,
+     "size_mb": 1300, "multilingual": False, "requires_gpu_for_speed": True,
+     "embed_prefix": "passage: ", "query_prefix": "query: ",
+     "throughput_docs_per_sec": {"cpu": 15, "mps": 80}},
+    {"name": "intfloat/multilingual-e5-large", "dim": 1024, "ctx_window": 512,
+     "size_mb": 2200, "multilingual": True, "requires_gpu_for_speed": True,
+     "embed_prefix": "passage: ", "query_prefix": "query: ",
+     "throughput_docs_per_sec": {"cpu": 12, "mps": 70}},
+    {"name": "nomic-ai/nomic-embed-text-v1.5", "dim": 768, "ctx_window": 8192,
+     "size_mb": 550, "multilingual": False, "requires_gpu_for_speed": False,
+     "embed_prefix": "search_document: ", "query_prefix": "search_query: ",
+     "throughput_docs_per_sec": {"cpu": 50, "mps": 200}},
+    {"name": "BAAI/bge-m3", "dim": 1024, "ctx_window": 8192,
+     "size_mb": 2300, "multilingual": True, "requires_gpu_for_speed": True,
+     "embed_prefix": "", "query_prefix": "",
+     "throughput_docs_per_sec": {"cpu": 10, "mps": 60}},
+    {"name": "mixedbread-ai/mxbai-embed-large-v1", "dim": 1024, "ctx_window": 512,
+     "size_mb": 1300, "multilingual": False, "requires_gpu_for_speed": True,
+     "embed_prefix": "",
+     "query_prefix": "Represent this sentence for searching relevant passages: ",
+     "throughput_docs_per_sec": {"cpu": 15, "mps": 80}},
+]
+
+
+def _format_size_mb(mb: int) -> str:
+    return f"{mb} MB" if mb < 1000 else f"~{mb / 1024:.1f} GB"
+
+
+def _estimate_index(model: Dict[str, Any], doc_count: int, compute_device: str) -> Dict[str, Any]:
+    """Concrete numbers a data scientist can act on:
+      - index size (bytes/MB at float32; assumes one vector per doc, no chunking)
+      - full-corpus embed time
+      - per-query embed latency
+
+    Estimates are deliberately rough — within ~2x for typical hardware, but
+    meant to convey order of magnitude (do I need a vector DB? is real-time
+    feasible?), not precision.
+    """
+    dim = int(model.get("dim", 768))
+    bytes_per_vec = dim * 4  # float32
+    index_bytes = doc_count * bytes_per_vec
+    rate = model["throughput_docs_per_sec"].get("mps" if compute_device == "mps" else "cpu", 50)
+    full_embed_seconds = round(doc_count / rate, 1) if rate else None
+    query_embed_ms = round(1000.0 / rate, 1) if rate else None
+    return {
+        "vector_dim": dim,
+        "vectors_per_doc": 1,
+        "index_size_bytes": index_bytes,
+        "index_size_human": _format_size_mb(index_bytes // (1024 * 1024)),
+        "embed_throughput_docs_per_sec": rate,
+        "estimated_full_embed_seconds": full_embed_seconds,
+        "estimated_query_embed_ms": query_embed_ms,
+    }
+
+
+def _recommend_reranker(multilingual: bool, top_model_size_mb: int) -> Dict[str, Any]:
+    """Embedding retrieval typically caps at ~70-75% recall@10. A small
+    cross-encoder reranker on top of the top-K retrieved candidates pushes
+    that to 85-95%. Pick a reranker that matches the corpus language and is
+    smaller than the embedder (so reranking the top-50 isn't more expensive
+    than embedding the corpus)."""
+    if multilingual:
+        return {
+            "name": "BAAI/bge-reranker-v2-m3",
+            "size_mb": 568,
+            "why": ("Cross-encoder reranker over top-K retrieved candidates. "
+                    "Multilingual variant — matches the multilingual embedder. "
+                    "Adds ~60-100ms per query for top-50 reranking and typically "
+                    "lifts recall@10 by 10-20 percentage points."),
+        }
+    return {
+        "name": "BAAI/bge-reranker-base",
+        "size_mb": 280,
+        "why": ("Cross-encoder reranker over top-K retrieved candidates. "
+                "English-only and lightweight. Adds ~30-60ms per query for "
+                "top-50 reranking and typically lifts recall@10 by 10-20 "
+                "percentage points. Step up to bge-reranker-large (~560 MB) "
+                "if quality matters more than latency."),
+    }
+
+
 def synthesize_heuristic_recommendation(ctx: AgentContext) -> Dict[str, Any]:
     """Produce a structured recommendation from the gathered context using
     deterministic rules. The same schema the LLM agent emits, so downstream
@@ -555,82 +674,81 @@ def synthesize_heuristic_recommendation(ctx: AgentContext) -> Dict[str, Any]:
     gpu_mem = float(specs.get("gpu_memory_gb") or 0.0)
     ram = float(specs.get("total_ram_gb") or 0.0)
     pii_count = int(pii.get("total", 0))
-    p95_tokens = int(analysis.get("token_stats", {}).get("max", 0))
+    token_stats = analysis.get("token_stats", {})
+    # Use p95 (with max as fallback) — drives chunking / context-window choice
+    # far more reliably than mean.
+    p95_tokens = int(token_stats.get("p95") or token_stats.get("max", 0))
+    p99_tokens = int(token_stats.get("p99") or token_stats.get("max", 0))
     chunking_needed = bool(analysis.get("chunking_needed"))
 
-    # Candidate model pool — open-source only, all run locally on Apple Silicon
-    # via sentence-transformers / transformers with MPS acceleration.
-    candidates: List[Tuple[str, int, str, bool]] = [
-        # (name, ctx_window, footprint, requires_gpu_for_speed)
-        ("sentence-transformers/all-MiniLM-L6-v2", 256, "tiny (~80 MB)", False),
-        ("sentence-transformers/all-mpnet-base-v2", 384, "medium (~420 MB)", False),
-        ("BAAI/bge-small-en-v1.5", 512, "small (~130 MB)", False),
-        ("BAAI/bge-large-en-v1.5", 512, "large (~1.3 GB)", True),
-        ("intfloat/e5-large-v2", 512, "large (~1.3 GB)", True),
-        ("nomic-ai/nomic-embed-text-v1.5", 8192, "medium (~550 MB)", False),
-        ("BAAI/bge-m3", 8192, "large (~2.3 GB)", True),
-        ("mixedbread-ai/mxbai-embed-large-v1", 512, "large (~1.3 GB)", True),
-    ]
+    lang = analysis.get("language_profile", {}) or {}
+    is_multilingual = bool(lang.get("multilingual") or lang.get("non_latin_present"))
 
-    # Privacy filter: every candidate is on-device / open-source, so this is a
-    # no-op today — kept so the heuristic still records the privacy posture
-    # and stays compatible with future hosted-model additions.
+    candidates: List[Dict[str, Any]] = list(EMBEDDING_CATALOGUE)
+
+    # Privacy filter — preserved as a no-op today (no hosted models in the
+    # catalogue) so the code path still records the privacy posture.
     privacy_sensitive = pii_count >= 5
-    if privacy_sensitive:
-        candidates = [c for c in candidates if "hosted" not in c[2]]
 
-    # Hardware filter: drop GPU-hungry models only on truly compute-light hosts.
-    # MPS (Apple Silicon Metal) counts as GPU acceleration, even though it
-    # doesn't expose a discrete VRAM number — it shares unified memory.
+    # Multilingual filter: if the corpus is multilingual or has non-Latin
+    # script, drop English-only models — they degrade significantly on
+    # mixed-language inputs.
+    if is_multilingual:
+        candidates = [c for c in candidates if c.get("multilingual")]
+
+    # Hardware filter: MPS (Apple Silicon Metal) counts as GPU acceleration.
     compute_device = str(specs.get("compute_device", "cpu"))
     has_accelerator = compute_device in {"cuda", "rocm", "mps"} and (
         compute_device == "mps" or has_gpu
     )
     sufficient_memory = (compute_device == "mps" and ram >= 16.0) or gpu_mem >= 4.0
     if not (has_accelerator and sufficient_memory):
-        candidates = [c for c in candidates if not c[3]]
+        candidates = [c for c in candidates if not c.get("requires_gpu_for_speed")]
 
-    # Score: prefer models whose context window is close to (but at least)
-    # what the corpus needs without chunking; if chunking is OK, prefer
-    # smaller models.
+    # Target window now driven by p95 — captures the long tail without being
+    # dominated by a single outlier (which max would be).
     target_window = 512 if chunking_needed else max(p95_tokens, 256)
 
-    def score(c: Tuple[str, int, str, bool]) -> Tuple[int, int]:
-        name, window, _, _ = c
-        # Penalty for under-fit, milder penalty for over-fit.
+    def score(c: Dict[str, Any]) -> Tuple[int, int]:
+        window = c["ctx_window"]
         if window < target_window:
             return (1, target_window - window)
         return (0, window - target_window)
 
     ranked = sorted(candidates, key=score)[:3]
 
-    recommended_models = [
-        {
-            "name": name,
+    recommended_models = []
+    for i, m in enumerate(ranked):
+        rationale_parts = [
+            f"Context window {m['ctx_window']}, dim {m['dim']}, {_format_size_mb(m['size_mb'])}.",
+            "GPU-recommended." if m.get("requires_gpu_for_speed") else "CPU-friendly.",
+            "Multilingual." if m.get("multilingual") else "English-only.",
+            "Open-source / on-device — privacy-preserving.",
+        ]
+        recommended_models.append({
+            "name": m["name"],
             "rank": i + 1,
-            "rationale": (
-                f"Context window {window}, {footprint}. "
-                + ("CPU-friendly. " if not gpu_required else "Best on GPU. ")
-                + ("Open-source / on-device — privacy-preserving." if "hosted" not in footprint else "Hosted API.")
-            ),
-        }
-        for i, (name, window, footprint, gpu_required) in enumerate(ranked)
-    ]
+            "rationale": " ".join(rationale_parts),
+            "dimension": m["dim"],
+            "context_window": m["ctx_window"],
+            "size_mb": m["size_mb"],
+            "multilingual": m.get("multilingual", False),
+            "embed_prefix": m.get("embed_prefix", ""),
+            "query_prefix": m.get("query_prefix", ""),
+        })
 
     chunking_strategy = {
         "needed": chunking_needed,
         "chunk_size_tokens": analysis.get("suggested_chunk_size") if chunking_needed else None,
         "overlap_tokens": analysis.get("suggested_overlap") if chunking_needed else None,
         "rationale": (
-            "Significant fraction of documents exceed 512 tokens; chunking "
-            "preserves compact-model viability."
+            f"p95 doc length is {p95_tokens} tokens; chunking preserves compact-model viability."
             if chunking_needed
-            else "Documents fit comfortably within compact-model context windows."
+            else f"p95 doc length is {p95_tokens} tokens — fits within compact-model context windows."
         ),
     }
 
-    # Fine-tuning heuristic: low TTR + high-frequency domain terms suggests
-    # the corpus is domain-specific enough to benefit from adaptation.
+    # Fine-tuning heuristic: low TTR + concentrated domain terms.
     vocab = analysis.get("vocabulary_metrics", {})
     ttr = float(vocab.get("type_token_ratio") or 1.0)
     top_term_freq = (
@@ -662,23 +780,46 @@ def synthesize_heuristic_recommendation(ctx: AgentContext) -> Dict[str, Any]:
     hardware_fit_analysis = (
         f"Total RAM: {ram} GB. "
         + accel_desc
-        + f"Top recommendation '{ranked[0][0]}' is {ranked[0][2]} — fits comfortably."
-        if ranked
-        else "No candidate model passed the hardware/privacy filters."
+        + (f"Top recommendation '{ranked[0]['name']}' is {_format_size_mb(ranked[0]['size_mb'])} — fits comfortably."
+           if ranked else "No candidate model passed the hardware/privacy filters.")
     )
+
+    # New: index + throughput estimate, reranker recommendation.
+    doc_count = int(analysis.get("doc_count", 0))
+    index_estimate = (
+        _estimate_index(ranked[0], doc_count, compute_device) if ranked else {}
+    )
+    reranker = _recommend_reranker(
+        multilingual=bool(ranked[0].get("multilingual")) if ranked else is_multilingual,
+        top_model_size_mb=ranked[0]["size_mb"] if ranked else 0,
+    )
+
+    # Reasoning explanation: incorporate the new signals (p95, language).
+    lang_blurb = ""
+    langs_list = lang.get("languages") or []
+    if langs_list:
+        primary = langs_list[0]
+        if is_multilingual:
+            lang_blurb = (f" Multilingual content ({', '.join(L['code'] for L in langs_list[:3])}) — "
+                          "preferred multilingual embedders.")
+        else:
+            lang_blurb = f" Primary language: {primary.get('code', '?')}."
 
     return {
         "recommended_models": recommended_models,
         "reasoning_explanation": (
             f"Detected {pii_count} PII redactions ({'privacy-sensitive' if privacy_sensitive else 'standard privacy'}). "
-            f"Corpus has {analysis.get('doc_count', 0)} documents averaging "
-            f"{analysis.get('token_stats', {}).get('mean', 0)} tokens. "
-            f"{'Chunking required' if chunking_needed else 'No chunking required'}. "
-            "Selected model balances corpus size, hardware, and privacy."
+            f"Corpus: {doc_count} documents, p50={token_stats.get('p50', 0):.0f} / "
+            f"p95={p95_tokens} / p99={p99_tokens} tokens. "
+            f"{'Chunking required' if chunking_needed else 'No chunking required'}."
+            f"{lang_blurb}"
         ),
         "chunking_strategy": chunking_strategy,
         "fine_tuning_advice": fine_tuning_advice,
         "hardware_fit_analysis": hardware_fit_analysis,
+        "index_estimate": index_estimate,
+        "reranker_recommendation": reranker,
+        "language_profile": lang,
     }
 
 
