@@ -4,9 +4,11 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-123%20passing-brightgreen.svg)](#tests)
+[![Tests](https://img.shields.io/badge/tests-158%20passing-brightgreen.svg)](#tests)
 
-SmartEmbedAgent profiles your hardware, sanitizes your corpus of PII, analyzes the cleaned text, and uses a **local LLM** (Ollama, Apple Silicon Metal-accelerated) to recommend the right embedding model and chunking strategy for your use case. It picks `BGE-small` for a CPU-only laptop running on a privacy-sensitive corpus, and `BGE-M3` for an M2 Pro indexing long technical documents — and explains why. **No API keys required. Runs fully on-device.**
+SmartEmbedAgent profiles your hardware, sanitizes your corpus of PII (Indian recognizers — Aadhaar/PAN/etc. — included by default), analyzes the cleaned text, and uses a **local LLM** (Ollama, Apple Silicon Metal-accelerated) to recommend the right embedding model and chunking strategy for your use case. It picks `BGE-small` for a CPU-only laptop running on a privacy-sensitive corpus, and `nomic-embed-text-v1.5` for a long-document corpus on an M-series Mac — and explains why, with concrete numbers (index size, embed throughput, query latency, suggested reranker). **No API keys required. Runs fully on-device.**
+
+Optional [OpenClaw](https://openclaw.ai) skill ships in the repo so you can ask for recommendations from WhatsApp, Telegram, Signal, iMessage, etc.
 
 ## Table of Contents
 
@@ -19,6 +21,7 @@ SmartEmbedAgent profiles your hardware, sanitizes your corpus of PII, analyzes t
 - [Detailed Usage](#detailed-usage)
 - [Configuration](#configuration)
 - [Example Outputs](#example-outputs)
+- [Chat-app integration (WhatsApp / Telegram / Signal via OpenClaw)](#chat-app-integration-whatsapp--telegram--signal-via-openclaw)
 - [Comparison: Agentic vs. Deterministic](#comparison-agentic-vs-deterministic)
 - [Roadmap](#roadmap)
 - [Contributing](#contributing)
@@ -47,9 +50,9 @@ flowchart TD
     Main --> Validator[config_validator]
     Main --> Agent[LangChain Agent<br/>ChatOllama · hermes3:8b]
 
-    Agent -->|tool call 1| Profiler[device_profiler]
-    Agent -->|tool call 2| PII[pii_remover<br/>regex + NER]
-    Agent -->|tool call 3| Analyzer[corpus_analyzer<br/>token stats]
+    Agent -->|tool call 1| Profiler[device_profiler<br/>RAM · MPS · CUDA]
+    Agent -->|tool call 2| PII[pii_remover<br/>regex + NER + India pack<br/>optional Presidio]
+    Agent -->|tool call 3| Analyzer[corpus_analyzer<br/>p95 tokens · langdetect]
     Agent -->|tool call 4| Search[web_search<br/>cached]
 
     Profiler --> Ctx[(Shared Agent Context)]
@@ -82,13 +85,19 @@ For the full breakdown, see [`docs/decision_points.md`](docs/decision_points.md)
 
 ## Key Features
 
-- **Agentic reasoning, fully local** — a Hermes 3 8B model running on your Mac (via Ollama) weighs hardware, privacy, corpus shape, and domain together rather than applying a fixed scoring function. No API keys, no data leaves your machine.
-- **Layered PII removal** — regex (with optional regional packs) + Hugging Face NER for named entities, plus user whitelist + force-redaction list. **India region pack** detects Aadhaar (Verhoeff-validated), PAN, Indian mobile, and vehicle registration numbers — opt in via `pii_settings.region_packs: ["india"]`. **Microsoft Presidio backend** is available as `pip install smart-embed-agent[presidio]` for 50+ additional entity types and confidence-scored detection.
+- **Agentic reasoning, fully local** — a Hermes 3 8B model on your Mac (via Ollama) weighs hardware, privacy, corpus shape, and domain together rather than applying a fixed scoring function. No API keys, no data leaves your machine.
+- **Layered PII removal** — regex + Hugging Face NER + user whitelist + force-redaction list. **India region pack on by default** — detects Aadhaar (Verhoeff-validated, so random 12-digit IDs aren't false-flagged), PAN, Indian mobile, and vehicle registration numbers. **Microsoft Presidio backend** is opt-in via `requirements-presidio.txt` for 50+ additional entity types and confidence-scored detection.
 - **Hardware-aware** — `psutil` + `torch` detection with NVIDIA CUDA, AMD ROCm, **Apple Silicon Metal (MPS)**, and CPU fallbacks. Reports unified memory on M-series Macs.
+- **Token percentiles, not just mean** — recommendation drives off `p95` token length, not the mean (which is biased by long-tail outliers). A corpus with `mean=100` but `p95=4000` still triggers chunking.
+- **Multilingual-aware** — `langdetect` runs on a corpus sample; if multilingual or non-Latin script is detected, the recommender automatically prefers `bge-m3` / `multilingual-e5-large` over English-only models.
+- **Concrete index/throughput estimates** — every recommendation includes vector dimension, full-corpus embed time, query-embed latency, and predicted index size in MB. Replaces "fits comfortably" hand-waves.
+- **Prompt-prefix templates** — BGE / Nomic / E5 etc. require specific `"search_document: "` / `"Represent this sentence..."` prefixes to hit their published quality numbers. The recommendation surfaces the exact strings to prepend at index/query time.
+- **Reranker recommendation** — embedding retrieval typically caps at ~70% recall@10. Each output suggests a paired cross-encoder reranker (`bge-reranker-base` for English, `bge-reranker-v2-m3` for multilingual) so you don't ship a half-built pipeline.
+- **Multi-source corpora** — `--corpus_path` accepts multiple files (`.txt`, `.md`, `.csv`, `.json`) or directories with mixed types. Files that fail to parse are skipped with a warning, not a crash.
 - **Configurable tokenization** — pass the tokenizer matching your target embedding model for exact token counts.
 - **Cached web search** — the agent can pull current best-practices and benchmarks; results cached to disk with TTL.
 - **Deterministic fallback** — the same JSON schema is emitted by a no-LLM heuristic path. Useful for CI and used automatically when Ollama is unreachable.
-- **Structured outputs** — JSON for programmatic use, Markdown report for humans.
+- **Structured outputs** — JSON for programmatic use, Markdown report for humans, and chat-formatted summary when invoked through OpenClaw.
 
 ## Installation
 
@@ -151,12 +160,25 @@ The script prints a step-by-step progress trace and writes:
 
 | Flag | Default | Purpose |
 |---|---|---|
-| `--corpus_path` | required | Path to corpus file (`.txt`, `.csv`, `.json`) or directory of `.txt` files. |
+| `--corpus_path` | required | One or more paths. Each may be a file (`.txt`, `.md`, `.csv`, `.json`) or a directory containing any mix of those types. Multiple paths concatenate into a single corpus. |
 | `--config_path` | required | Path to user config JSON (validated against the schema). |
 | `--output_path` | `runs/recommendation.json` | Where to write the JSON report. The Markdown report is written alongside. |
 | `--verbose` | off | Enable debug-level logging. |
-| `--no_llm` | off | Skip the LLM step and use the deterministic heuristic. Useful for CI. |
+| `--no_llm` | off | Skip the LLM step and use the deterministic heuristic. Useful for CI or when Ollama isn't installed. |
 | `--schema` | `config/config_schema.json` | Override the validation schema. |
+
+Examples:
+
+```bash
+# Single file
+python main.py --corpus_path data/sample_long.txt --config_path config/sample_config.json
+
+# Multiple files of mixed types
+python main.py --corpus_path notes.md reviews.csv ~/dump/scrape.json --config_path config/sample_config.json
+
+# A directory containing .txt + .md + .csv + .json
+python main.py --corpus_path ~/data/customer_notes/ --config_path config/sample_config.json
+```
 
 ### Programmatic use
 
@@ -180,19 +202,26 @@ User configuration lives in a single JSON file with four top-level groups: `pii_
 
 ### PII recognizer options
 
-Two optional fields in `pii_settings` control how aggressively PII is detected:
+Two `pii_settings` fields control PII detection:
 
 ```jsonc
 "pii_settings": {
   // ... existing fields ...
   "recognizer": "legacy",       // or "presidio" (requires extras install)
-  "region_packs": ["india"]     // optional regional recognizer packs
+  "region_packs": ["india"]     // ON BY DEFAULT in sample_config.json
 }
 ```
 
-- `recognizer: "legacy"` (default) — regex catalog + `dslim/bert-base-NER` for named entities. Lightweight, no extra deps.
-- `recognizer: "presidio"` — Microsoft Presidio (50+ entity types, validated detection, confidence scores). Requires `pip install smart-embed-agent[presidio]`. Falls back to legacy if not installed.
-- `region_packs: ["india"]` — adds Aadhaar (Verhoeff-validated), PAN, Indian mobile, and vehicle registration recognizers. Apply to either backend.
+- `recognizer: "legacy"` (default) — regex catalog + `dslim/bert-base-NER`. Lightweight, no extra deps.
+- `recognizer: "presidio"` — Microsoft Presidio (50+ entity types, validated detection, confidence scores). Requires the optional install:
+  ```bash
+  pip install -r requirements-presidio.txt
+  python -m spacy download en_core_web_lg
+  ```
+  Falls back to `legacy` (with a warning in the report) if Presidio isn't installed.
+- `region_packs: ["india"]` — Aadhaar (Verhoeff-validated), PAN, Indian mobile, and vehicle registration. **On by default** in `sample_config.json` because the recognizers are cheap and add real value for any India-related corpus.
+
+Each redaction report carries `recognizer_used` and `region_packs` so audit logs record which detector caught each entity.
 
 Validate a config before invoking the agent:
 
@@ -203,11 +232,10 @@ python -m src.config_validator config/my_config.json
 ## Example Outputs
 
 ```bash
-# Run on the medical sample (lots of PII, sensitive domain)
-python main.py --corpus_path data/sample_medical.txt --config_path config/sample_config.json --no_llm
+python main.py --corpus_path data/sample_long.txt --config_path config/sample_config.json --no_llm
 ```
 
-Produces (excerpt):
+Produces (excerpt — full schema):
 
 ```json
 {
@@ -215,19 +243,81 @@ Produces (excerpt):
     {
       "name": "BAAI/bge-small-en-v1.5",
       "rank": 1,
-      "rationale": "Context window 512, small (~130 MB). CPU-friendly. Open-source / on-device — privacy-preserving."
+      "rationale": "Context window 512, dim 384, 130 MB. CPU-friendly. English-only. Open-source / on-device — privacy-preserving.",
+      "dimension": 384,
+      "context_window": 512,
+      "size_mb": 130,
+      "multilingual": false,
+      "embed_prefix": "",
+      "query_prefix": "Represent this sentence for searching relevant passages: "
     }
   ],
-  "reasoning_explanation": "Detected 12 PII redactions (privacy-sensitive). Hosted models filtered out. ...",
+  "reasoning_explanation": "Detected 1 PII redactions (standard privacy). Corpus: 10 documents, p50=88 / p95=180 / p99=476 tokens. No chunking required. Primary language: en.",
   "chunking_strategy": {
-    "needed": true,
-    "chunk_size_tokens": 384,
-    "overlap_tokens": 58
+    "needed": false,
+    "chunk_size_tokens": null,
+    "overlap_tokens": null,
+    "rationale": "p95 doc length is 180 tokens — fits within compact-model context windows."
+  },
+  "fine_tuning_advice": "Recommended. The corpus has low lexical diversity (TTR < 0.2) and concentrated domain terminology, both signals that domain adaptation via fine-tuning or contrastive training would improve retrieval quality.",
+  "hardware_fit_analysis": "Total RAM: 48.0 GB. Apple Silicon (Apple M4 Max) with 48.0 GB unified memory. Top recommendation 'BAAI/bge-small-en-v1.5' is 130 MB — fits comfortably.",
+  "index_estimate": {
+    "vector_dim": 384,
+    "index_size_human": "11 MB",
+    "embed_throughput_docs_per_sec": 500,
+    "estimated_full_embed_seconds": 12.8,
+    "estimated_query_embed_ms": 2.0
+  },
+  "reranker_recommendation": {
+    "name": "BAAI/bge-reranker-base",
+    "size_mb": 280,
+    "why": "Cross-encoder reranker over top-K retrieved candidates. English-only and lightweight. Adds ~30-60ms per query for top-50 reranking and typically lifts recall@10 by 10-20 percentage points."
+  },
+  "language_profile": {
+    "languages": [{"code": "en", "share": 1.0}],
+    "multilingual": false,
+    "non_latin_present": false,
+    "detector": "langdetect"
   }
 }
 ```
 
 Full sample runs are in [`docs/DEMO_OUTPUT.md`](docs/DEMO_OUTPUT.md).
+
+## Chat-app integration (WhatsApp / Telegram / Signal via OpenClaw)
+
+If you have [OpenClaw](https://openclaw.ai) installed, this repo ships a ready-to-use skill that lets you ask for recommendations from any chat app OpenClaw supports. The flow:
+
+> *(WhatsApp)* "Recommend an embedding model for `~/data/customer_reviews.csv`"
+>
+> *(reply, ~30s)*
+> 🧭 Top: `BAAI/bge-small-en-v1.5` — Context window 512, dim 384, 130 MB. CPU-friendly. English-only.
+> ⚙️ Chunking: no
+> 💾 Hardware: M4 Max + 48 GB unified memory. Top recommendation 130 MB — fits comfortably.
+> 🎯 Fine-tuning: Recommended. Corpus has low lexical diversity (TTR < 0.2)…
+> 📊 Index estimate: 11 MB (dim 384); embed full corpus ~12.8s; query embed ~2ms
+> 🎚️ Reranker: `BAAI/bge-reranker-base` (~280 MB)
+> 📚 Language: en (100%)
+
+Setup:
+
+```bash
+# 1. Install OpenClaw and link a chat channel (e.g. WhatsApp)
+brew install openclaw   # or per https://openclaw.ai
+openclaw channels login --channel whatsapp
+
+# 2. Install the skill (symlink or copy)
+ln -s "$SMARTEMBED_HOME/integrations/openclaw" \
+      ~/.openclaw/skills/recommend-embedding-model
+echo 'export SMARTEMBED_HOME=~/path/to/SmartEmbedAgent' >> ~/.zshrc
+launchctl setenv SMARTEMBED_HOME "$SMARTEMBED_HOME"   # for the gateway service
+
+# 3. Bigger model recommended for skill invocation reliability
+ollama pull qwen2.5:32b
+openclaw models set ollama/qwen2.5:32b
+```
+
+See [`integrations/openclaw/README.md`](integrations/openclaw/README.md) for the full setup guide and [`integrations/openclaw/SKILL.md`](integrations/openclaw/SKILL.md) for the skill manifest.
 
 ## Comparison: Agentic vs. Deterministic
 
@@ -246,12 +336,19 @@ SmartEmbedAgent ships both: the agent for production use, the deterministic fall
 
 ## Roadmap
 
-- [ ] Web UI for non-technical users
-- [ ] WhatsApp / Slack interface for ad-hoc corpus analysis
-- [ ] Integration with vector DBs (Pinecone, Weaviate, Qdrant) for end-to-end retrieval evaluation
-- [ ] Automatic fine-tuning recipe generation when fine-tuning is recommended
-- [ ] Cohere and Voyage as first-class candidates in the agent's pool
-- [ ] Notebook of canonical case studies (legal, medical, code, multilingual)
+- [x] **WhatsApp / Telegram / Signal / iMessage interface** — shipped via the OpenClaw skill at [`integrations/openclaw/`](integrations/openclaw/)
+- [x] **Apple Silicon Metal (MPS) acceleration**
+- [x] **Indian PII detection** (Aadhaar with Verhoeff, PAN, vehicle reg, Indian mobile)
+- [x] **Microsoft Presidio backend** (opt-in)
+- [x] **Token-percentile-driven chunking decision** + multilingual-aware model selection
+- [x] **Index size + throughput estimate** + reranker recommendation in the output
+- [ ] **`--evaluate` flag** for empirical model bake-off — sample held-out docs, generate queries via the local LLM, score recall@10 across the top-3 candidates
+- [ ] **Near-duplicate detection** at corpus-load time (MinHash/SimHash) with dedupe suggestion
+- [ ] **Per-source breakdown** when the corpus has multiple sources (e.g. `Reddit reviews 2x longer than BikeWale; chunk those`)
+- [ ] **Vector store recommendation** (FAISS / Chroma / Qdrant) based on corpus size + write pattern
+- [ ] **Web UI** for non-technical users
+- [ ] **Automatic fine-tuning recipe generation** when fine-tuning is recommended
+- [ ] **Notebook of canonical case studies** (legal, medical, code, multilingual)
 
 ## Contributing
 
@@ -261,13 +358,18 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development setup, code style, and 
 
 - **Ollama** for making local LLM serving on Apple Silicon trivial.
 - **Nous Research** for Hermes 3, the default tool-calling reasoning model.
-- **Alibaba** for the Qwen 3 family (alternative reasoning models).
+- **Alibaba** for the Qwen 2.5 / Qwen 3 family (recommended for skill invocation; `qwen2.5:32b` is the default for the OpenClaw integration).
+- **OpenClaw** for the multi-channel chat-app agent runtime that the WhatsApp / Signal / Telegram integration is built on.
+- **Microsoft Presidio** for the optional 50+-entity PII recognizer.
+- **`langdetect`** for the language-profile detector behind multilingual-aware model selection.
 - **Hugging Face** for the NER models, tokenizers, and the `transformers` ecosystem.
-- **BAAI** for the BGE family of embedding models.
+- **BAAI** for the BGE / BGE-M3 / BGE-Reranker families.
 - **Nomic AI** for `nomic-embed-text-v1.5`.
 - **mixedbread.ai** for `mxbai-embed-large-v1`.
-- **`dslim`** for `dslim/bert-base-NER`, the default NER model used in the PII pipeline.
-- The **LangChain** project for the agent framework that ties everything together.
+- **`intfloat`** for the E5 family (multilingual variant powers multilingual corpora).
+- **`dslim`** for `dslim/bert-base-NER`, the default NER model used in the legacy PII pipeline.
+- The **LangChain** project for the agent framework.
+- The **Verhoeff algorithm** (Jacobus Verhoeff, 1969) — quietly filtering ~90% of false-positive Aadhaar matches so order IDs don't get redacted as PII.
 
 ## License
 
