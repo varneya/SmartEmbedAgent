@@ -21,7 +21,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from src.pii_remover import REDACTION_TOKENS, remove_pii
+from src.pii_remover import REDACTION_TOKENS, remove_pii, _verhoeff_check
 
 
 class TestRegexRedaction(unittest.TestCase):
@@ -122,6 +122,114 @@ class TestTokenContract(unittest.TestCase):
     def test_all_categories_have_redaction_tokens(self):
         for category, token in REDACTION_TOKENS.items():
             self.assertTrue(token.startswith("REDACTED_"), token)
+
+
+class TestIndianRegionPack(unittest.TestCase):
+    """Region pack 'india' adds Aadhaar, PAN, Indian mobile, vehicle reg.
+    None of these are detected when the pack is omitted."""
+
+    def test_aadhaar_redacted_when_pack_enabled(self):
+        # Synthetic Aadhaar with a valid Verhoeff check digit (last digit).
+        text = "Aadhaar: 4567 1234 5679"
+        self.assertTrue(_verhoeff_check("4567 1234 5679"))
+        cleaned, report = remove_pii(text, {"region_packs": ["india"]}, use_ner=False)
+        self.assertIn("REDACTED_AADHAAR", cleaned)
+        self.assertNotIn("4567", cleaned)
+        self.assertEqual(report["summary"].get("AADHAAR"), 1)
+
+    def test_aadhaar_NOT_detected_when_pack_disabled(self):
+        text = "Aadhaar: 4567 1234 5679"
+        cleaned, report = remove_pii(text, {}, use_ner=False)
+        self.assertNotIn("REDACTED_AADHAAR", cleaned)
+        self.assertNotIn("AADHAAR", report["summary"])
+
+    def test_verhoeff_filters_random_12_digit(self):
+        # Looks like an Aadhaar but the check digit fails Verhoeff.
+        # 1234 5678 9012 has check digit 2 which is wrong.
+        text = "Order ID 1234 5678 9012 was shipped."
+        cleaned, report = remove_pii(text, {"region_packs": ["india"]}, use_ner=False)
+        self.assertNotIn("REDACTED_AADHAAR", cleaned, "Verhoeff should reject random numbers")
+
+    def test_pan_redacted(self):
+        text = "PAN: ABCDE1234F"
+        cleaned, report = remove_pii(text, {"region_packs": ["india"]}, use_ner=False)
+        self.assertIn("REDACTED_PAN", cleaned)
+        self.assertEqual(report["summary"].get("PAN"), 1)
+
+    def test_indian_mobile_redacted(self):
+        for number in ("+91 9876543210", "919876543210", "9876543210", "09876543210"):
+            text = f"Call me at {number}"
+            cleaned, report = remove_pii(text, {"region_packs": ["india"]}, use_ner=False)
+            # INDIAN_MOBILE wins over generic PHONE thanks to specificity ordering.
+            self.assertIn("REDACTED_PHONE", cleaned, f"failed for {number!r}")
+            # Either categorized as INDIAN_MOBILE or PHONE — both ok.
+            cats = report["summary"]
+            self.assertTrue(cats.get("INDIAN_MOBILE", 0) + cats.get("PHONE", 0) >= 1, f"failed for {number!r}")
+
+    def test_vehicle_registration_redacted(self):
+        text = "Bike registration MH-12-AB-1234 was renewed."
+        cleaned, report = remove_pii(text, {"region_packs": ["india"]}, use_ner=False)
+        self.assertIn("REDACTED_VEHICLE", cleaned)
+        self.assertEqual(report["summary"].get("INDIAN_VEHICLE"), 1)
+
+    def test_unknown_region_pack_logs_but_does_not_crash(self):
+        # Should warn about unknown pack and still apply core regex.
+        text = "Email: alice@example.com"
+        cleaned, report = remove_pii(text, {"region_packs": ["mars"]}, use_ner=False)
+        self.assertIn("REDACTED_EMAIL", cleaned)
+
+
+class TestRecognizerBackend(unittest.TestCase):
+    """The 'recognizer' config field selects between legacy and presidio
+    backends, and the report records which one was used."""
+
+    def test_legacy_backend_default(self):
+        _, report = remove_pii("Email me at alice@example.com.", {}, use_ner=False)
+        self.assertEqual(report.get("recognizer_used"), "legacy")
+        self.assertEqual(report.get("region_packs"), [])
+
+    def test_legacy_backend_explicit(self):
+        _, report = remove_pii(
+            "Email me at alice@example.com.",
+            {"recognizer": "legacy", "region_packs": ["india"]},
+            use_ner=False,
+        )
+        self.assertEqual(report["recognizer_used"], "legacy")
+        self.assertEqual(report["region_packs"], ["india"])
+
+    def test_presidio_falls_back_to_legacy_when_unavailable(self):
+        # presidio isn't installed in CI by default — the request should
+        # silently fall back to legacy with the report flagging it.
+        try:
+            import presidio_analyzer  # noqa: F401
+            self.skipTest("presidio is installed; this test is for fallback behavior.")
+        except ImportError:
+            pass
+        _, report = remove_pii(
+            "Email me at alice@example.com.",
+            {"recognizer": "presidio"},
+            use_ner=False,
+        )
+        self.assertEqual(report["recognizer_used"], "legacy", "should fall back when presidio missing")
+        # Detection still works via the regex backend.
+        self.assertGreater(report["total"], 0)
+
+
+class TestVerhoeffChecksum(unittest.TestCase):
+    def test_known_valid_aadhaar(self):
+        # Synthetic test vectors — last digit is the Verhoeff check digit,
+        # generated by computing Verhoeff over the first 11 digits.
+        for valid in ("456712345679", "987654321096", "123456789010"):
+            self.assertTrue(_verhoeff_check(valid), f"{valid} should validate")
+
+    def test_invalid_check_digit(self):
+        # Same as above with the last digit altered (off by one).
+        self.assertFalse(_verhoeff_check("456712345670"))
+        self.assertFalse(_verhoeff_check("987654321090"))
+
+    def test_wrong_length(self):
+        self.assertFalse(_verhoeff_check("12345"))
+        self.assertFalse(_verhoeff_check("1234567890123"))
 
 
 if __name__ == "__main__":

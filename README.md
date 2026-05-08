@@ -83,7 +83,7 @@ For the full breakdown, see [`docs/decision_points.md`](docs/decision_points.md)
 ## Key Features
 
 - **Agentic reasoning, fully local** — a Hermes 3 8B model running on your Mac (via Ollama) weighs hardware, privacy, corpus shape, and domain together rather than applying a fixed scoring function. No API keys, no data leaves your machine.
-- **Layered PII removal** — regex for high-confidence patterns + Hugging Face NER for named entities, with user whitelist and force-redaction list.
+- **Layered PII removal** — regex (with optional regional packs) + Hugging Face NER for named entities, plus user whitelist + force-redaction list. **India region pack** detects Aadhaar (Verhoeff-validated), PAN, Indian mobile, and vehicle registration numbers — opt in via `pii_settings.region_packs: ["india"]`. **Microsoft Presidio backend** is available as `pip install smart-embed-agent[presidio]` for 50+ additional entity types and confidence-scored detection.
 - **Hardware-aware** — `psutil` + `torch` detection with NVIDIA CUDA, AMD ROCm, **Apple Silicon Metal (MPS)**, and CPU fallbacks. Reports unified memory on M-series Macs.
 - **Configurable tokenization** — pass the tokenizer matching your target embedding model for exact token counts.
 - **Cached web search** — the agent can pull current best-practices and benchmarks; results cached to disk with TTL.
@@ -177,6 +177,22 @@ response = agent.invoke({"input": "Analyze this corpus and recommend a model."})
 ## Configuration
 
 User configuration lives in a single JSON file with four top-level groups: `pii_settings`, `model_preferences`, `hardware_constraints`, and `agent_settings`. See [`docs/CONFIG_GUIDE.md`](docs/CONFIG_GUIDE.md) for full field documentation and [`config/sample_config.json`](config/sample_config.json) for a worked example.
+
+### PII recognizer options
+
+Two optional fields in `pii_settings` control how aggressively PII is detected:
+
+```jsonc
+"pii_settings": {
+  // ... existing fields ...
+  "recognizer": "legacy",       // or "presidio" (requires extras install)
+  "region_packs": ["india"]     // optional regional recognizer packs
+}
+```
+
+- `recognizer: "legacy"` (default) — regex catalog + `dslim/bert-base-NER` for named entities. Lightweight, no extra deps.
+- `recognizer: "presidio"` — Microsoft Presidio (50+ entity types, validated detection, confidence scores). Requires `pip install smart-embed-agent[presidio]`. Falls back to legacy if not installed.
+- `region_packs: ["india"]` — adds Aadhaar (Verhoeff-validated), PAN, Indian mobile, and vehicle registration recognizers. Apply to either backend.
 
 Validate a config before invoking the agent:
 

@@ -141,6 +141,8 @@ def extract_pii_config(config: Dict[str, Any]) -> Dict[str, Any]:
         "whitelist": pii.get("whitelist", []),
         "redaction_list": pii.get("custom_redaction_list", []),
         "ner_model": pii.get("ner_model_choice", "dslim/bert-base-NER"),
+        "recognizer": pii.get("recognizer", "legacy"),
+        "region_packs": pii.get("region_packs", []),
     }
     aggressiveness = pii.get("redaction_aggressiveness", "medium")
     if aggressiveness == "low":

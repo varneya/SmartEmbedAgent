@@ -7,13 +7,31 @@ approach:
 
   1. Regex pass for high-confidence patterns (emails, phones, SSNs, credit
      cards, IPv4 addresses).
-  2. NER pass using a pre-trained Hugging Face model (default
+  2. Optional region packs (currently: 'india') add region-specific
+     recognizers — Aadhaar (Verhoeff-validated), PAN, Indian mobile,
+     vehicle registration. Enable via `pii_settings.region_packs: ["india"]`.
+  3. NER pass using a pre-trained Hugging Face model (default
      `dslim/bert-base-NER`) to catch PERSON, LOCATION, and ORGANIZATION
      entities.
-  3. User-supplied custom redaction list — force-redacted regardless of
+  4. User-supplied custom redaction list — force-redacted regardless of
      model confidence.
-  4. User-supplied whitelist — strings that are exempt from redaction even
+  5. User-supplied whitelist — strings that are exempt from redaction even
      if they match a regex or are flagged by NER.
+
+Backends
+--------
+    legacy (default)  : the regex + HF-NER pipeline above; lightweight, no
+                        extra deps beyond transformers (already required).
+    presidio          : opt-in, uses Microsoft Presidio
+                        (`pip install smart-embed-agent[presidio]`). Brings
+                        50+ additional recognizers, validated detection
+                        (Luhn for credit cards), and confidence scores.
+                        Region packs continue to apply.
+
+    Select via `pii_settings.recognizer = "legacy" | "presidio"`. If
+    "presidio" is requested but the package is not installed, the module
+    logs a warning and falls back to legacy so privacy is never silently
+    weaker than configured.
 
 Public API
 ----------
@@ -26,7 +44,8 @@ logs.
 Replacement tokens
 ------------------
     REDACTED_EMAIL, REDACTED_PHONE, REDACTED_SSN, REDACTED_CC, REDACTED_IP,
-    REDACTED_NAME, REDACTED_LOCATION, REDACTED_ORG, REDACTED_CUSTOM
+    REDACTED_NAME, REDACTED_LOCATION, REDACTED_ORG, REDACTED_CUSTOM,
+    REDACTED_AADHAAR, REDACTED_PAN, REDACTED_VEHICLE
 """
 
 from __future__ import annotations
@@ -80,6 +99,68 @@ REDACTION_TOKENS: Dict[str, str] = {
     "LOCATION": "REDACTED_LOCATION",
     "ORG": "REDACTED_ORG",
     "CUSTOM": "REDACTED_CUSTOM",
+    # India region pack
+    "AADHAAR": "REDACTED_AADHAAR",
+    "PAN": "REDACTED_PAN",
+    "INDIAN_MOBILE": "REDACTED_PHONE",       # reuse — same downstream signal
+    "INDIAN_VEHICLE": "REDACTED_VEHICLE",
+}
+
+
+# ---------------------------------------------------------------------------
+# Region packs — each pack contributes additional regex patterns + an
+# optional per-category validator. Validators (e.g. Verhoeff for Aadhaar)
+# filter out random N-digit sequences so we don't redact timestamps and
+# order numbers as PII.
+# ---------------------------------------------------------------------------
+INDIA_REGEX_PATTERNS: Dict[str, str] = {
+    # 12-digit Aadhaar with optional spaces/dashes between blocks of 4.
+    "AADHAAR": r"\b\d{4}[-\s]?\d{4}[-\s]?\d{4}\b",
+    # PAN: 5 letters + 4 digits + 1 letter.
+    "PAN": r"\b[A-Z]{5}[0-9]{4}[A-Z]\b",
+    # Indian mobile: optional +91 / 0 prefix, then 10 digits starting 6-9.
+    "INDIAN_MOBILE": r"(?:\+?91[-\s]?|0)?[6-9]\d{9}\b",
+    # Vehicle registration: STATE(2) + RTO(1-2) + SERIES(1-3) + 4 digits.
+    "INDIAN_VEHICLE": r"\b[A-Z]{2}[-\s]?\d{1,2}[-\s]?[A-Z]{1,3}[-\s]?\d{4}\b",
+}
+
+REGION_PACKS: Dict[str, Dict[str, str]] = {
+    "india": INDIA_REGEX_PATTERNS,
+}
+
+
+# Verhoeff checksum tables — used to validate Aadhaar so random 12-digit
+# numbers (timestamps, order IDs) don't get falsely redacted.
+_VERHOEFF_D = (
+    (0,1,2,3,4,5,6,7,8,9), (1,2,3,4,0,6,7,8,9,5),
+    (2,3,4,0,1,7,8,9,5,6), (3,4,0,1,2,8,9,5,6,7),
+    (4,0,1,2,3,9,5,6,7,8), (5,9,8,7,6,0,4,3,2,1),
+    (6,5,9,8,7,1,0,4,3,2), (7,6,5,9,8,2,1,0,4,3),
+    (8,7,6,5,9,3,2,1,0,4), (9,8,7,6,5,4,3,2,1,0),
+)
+_VERHOEFF_P = (
+    (0,1,2,3,4,5,6,7,8,9), (1,5,7,6,2,8,3,0,9,4),
+    (5,8,0,3,7,9,6,1,4,2), (8,9,1,6,0,4,3,5,2,7),
+    (9,4,5,3,1,2,6,8,7,0), (4,2,8,6,5,7,3,9,0,1),
+    (2,7,9,3,8,0,6,4,1,5), (7,0,4,6,9,1,3,2,5,8),
+)
+
+
+def _verhoeff_check(num: str) -> bool:
+    """Verhoeff checksum validator. Aadhaar's 12th digit is a Verhoeff
+    check digit; this filters ~90% of random 12-digit false positives."""
+    digits = [int(d) for d in reversed(num) if d.isdigit()]
+    if len(digits) != 12:
+        return False
+    c = 0
+    for i, d in enumerate(digits):
+        c = _VERHOEFF_D[c][_VERHOEFF_P[i % 8][d]]
+    return c == 0
+
+
+# Per-category extra validators. Returning False here filters the match out.
+EXTRA_VALIDATORS: Dict[str, Any] = {
+    "AADHAAR": lambda m: _verhoeff_check(m),
 }
 
 # NER label mapping. dslim/bert-base-NER uses PER/LOC/ORG/MISC; we normalize.
@@ -141,17 +222,24 @@ def _resolve_overlapping_spans(
     """Given (start, end, category, original, source) tuples, return a
     non-overlapping subset, preferring earlier-listed (more specific)
     categories and longer spans on ties."""
-    # Specificity order: explicit categories beat broader ones.
+    # Specificity order: explicit categories beat broader ones. Region-pack
+    # entries (AADHAAR, PAN, INDIAN_*) rank above the generic equivalents
+    # they could overlap with (CREDIT_CARD, PHONE) so a 12-digit Aadhaar
+    # isn't redacted as a 12-digit "credit card".
     specificity = {
         "CUSTOM": 0,
-        "SSN": 1,
-        "EMAIL": 2,
-        "CREDIT_CARD": 3,
-        "IP": 4,
-        "PHONE": 5,
-        "NAME": 6,
-        "LOCATION": 7,
-        "ORG": 8,
+        "AADHAAR": 1,
+        "PAN": 1,
+        "INDIAN_MOBILE": 1,
+        "INDIAN_VEHICLE": 1,
+        "SSN": 2,
+        "EMAIL": 3,
+        "CREDIT_CARD": 4,
+        "IP": 5,
+        "PHONE": 6,
+        "NAME": 7,
+        "LOCATION": 8,
+        "ORG": 9,
     }
     spans = sorted(
         spans,
@@ -197,11 +285,25 @@ def _apply_replacements(
 
 
 # ---------------------------------------------------------------------------
-# Stage 1 — regex
+# Stage 1 — regex (core + region packs)
 # ---------------------------------------------------------------------------
-def _regex_spans(text: str, whitelist: Iterable[str]) -> List[Tuple[int, int, str, str, str]]:
+def _regex_spans(
+    text: str,
+    whitelist: Iterable[str],
+    region_packs: Optional[Iterable[str]] = None,
+) -> List[Tuple[int, int, str, str, str]]:
     spans: List[Tuple[int, int, str, str, str]] = []
-    for category, pattern in REGEX_PATTERNS.items():
+
+    # Build the combined catalog: core patterns + any opt-in region packs.
+    catalog: Dict[str, str] = dict(REGEX_PATTERNS)
+    for pack_name in (region_packs or []):
+        pack = REGION_PACKS.get(pack_name)
+        if pack:
+            catalog.update(pack)
+        else:
+            logger.warning("Unknown region pack '%s'; ignoring.", pack_name)
+
+    for category, pattern in catalog.items():
         for m in re.finditer(pattern, text):
             matched = m.group(0)
             # Filter low-quality phone matches: must contain at least 7 digits.
@@ -213,6 +315,10 @@ def _regex_spans(text: str, whitelist: Iterable[str]) -> List[Tuple[int, int, st
                 digits_only = re.sub(r"[ -]", "", matched)
                 if not (13 <= len(digits_only) <= 19):
                     continue
+            # Per-category validators (e.g. Verhoeff for AADHAAR).
+            validator = EXTRA_VALIDATORS.get(category)
+            if validator is not None and not validator(matched):
+                continue
             if _is_whitelisted(matched, whitelist):
                 continue
             spans.append((m.start(), m.end(), category, matched, "regex"))
@@ -288,6 +394,101 @@ def _ner_spans(
 
 
 # ---------------------------------------------------------------------------
+# Alternative backend — Microsoft Presidio (opt-in)
+# ---------------------------------------------------------------------------
+# Maps Presidio's entity-type vocabulary onto our internal categories so the
+# downstream report shape and replacement tokens stay consistent across
+# backends. Anything not in this map keeps its raw entity_type as the
+# category (and gets a generic REDACTED_<type> token).
+_PRESIDIO_ENTITY_TO_CATEGORY: Dict[str, str] = {
+    "EMAIL_ADDRESS": "EMAIL",
+    "PHONE_NUMBER": "PHONE",
+    "US_SSN": "SSN",
+    "CREDIT_CARD": "CREDIT_CARD",
+    "IP_ADDRESS": "IP",
+    "PERSON": "NAME",
+    "LOCATION": "LOCATION",
+    "ORGANIZATION": "ORG",
+    "NRP": "ORG",  # Nationality / religious / political group → coarse ORG
+    # India region-pack names propagate as-is.
+    "AADHAAR": "AADHAAR",
+    "PAN": "PAN",
+    "INDIAN_MOBILE": "INDIAN_MOBILE",
+    "INDIAN_VEHICLE": "INDIAN_VEHICLE",
+}
+
+
+class _PresidioWrapper:
+    """Lazily-loaded Presidio AnalyzerEngine. Cached so the first analyze()
+    pays the spaCy model load cost only once per process."""
+
+    _instance: Optional["_PresidioWrapper"] = None
+
+    def __init__(self, region_packs: Iterable[str]) -> None:
+        from presidio_analyzer import AnalyzerEngine, PatternRecognizer, Pattern
+
+        self.analyzer = AnalyzerEngine()
+        self.region_packs = sorted(set(region_packs))
+
+        # Register custom recognizers for each opt-in region pack.
+        for pack in self.region_packs:
+            for entity_type, pattern in REGION_PACKS.get(pack, {}).items():
+                self.analyzer.registry.add_recognizer(
+                    PatternRecognizer(
+                        supported_entity=entity_type,
+                        patterns=[Pattern(name=entity_type, regex=pattern, score=0.85)],
+                    )
+                )
+
+    @classmethod
+    def get(cls, region_packs: Iterable[str]) -> "_PresidioWrapper":
+        key = tuple(sorted(set(region_packs or [])))
+        if cls._instance is None or tuple(cls._instance.region_packs) != key:
+            cls._instance = cls(region_packs or [])
+        return cls._instance
+
+
+def _presidio_spans(
+    text: str,
+    whitelist: Iterable[str],
+    region_packs: Optional[Iterable[str]] = None,
+    score_threshold: float = 0.4,
+) -> Optional[List[Tuple[int, int, str, str, str]]]:
+    """Run Presidio analyzer on `text`. Returns the spans or None if Presidio
+    isn't installed (caller falls back to the legacy regex+NER pipeline)."""
+    try:
+        wrapper = _PresidioWrapper.get(region_packs or [])
+    except ImportError:
+        logger.warning(
+            "presidio not installed; install with `pip install smart-embed-agent[presidio]` "
+            "or set pii_settings.recognizer to 'legacy'. Falling back to legacy backend."
+        )
+        return None
+    except Exception as e:
+        logger.warning("Presidio init failed (%s); falling back to legacy backend.", e)
+        return None
+
+    try:
+        results = wrapper.analyzer.analyze(text=text, language="en", score_threshold=score_threshold)
+    except Exception as e:
+        logger.warning("Presidio analysis failed (%s); falling back to legacy backend.", e)
+        return None
+
+    spans: List[Tuple[int, int, str, str, str]] = []
+    for r in results:
+        original = text[r.start:r.end]
+        if _is_whitelisted(original, whitelist):
+            continue
+        # Apply the same per-category validator (e.g. Verhoeff for Aadhaar).
+        category = _PRESIDIO_ENTITY_TO_CATEGORY.get(r.entity_type, r.entity_type)
+        validator = EXTRA_VALIDATORS.get(category)
+        if validator is not None and not validator(original):
+            continue
+        spans.append((r.start, r.end, category, original, "presidio"))
+    return spans
+
+
+# ---------------------------------------------------------------------------
 # Stage 3 — custom redaction list (force, regardless of detection)
 # ---------------------------------------------------------------------------
 def _custom_spans(
@@ -347,7 +548,8 @@ def remove_pii(
     use_ner: bool = True,
 ) -> Tuple[str, Dict[str, Any]]:
     """
-    Strip PII from `corpus` using regex + NER + user rules.
+    Strip PII from `corpus` using regex + NER + user rules (or Presidio if
+    selected via `config["recognizer"] = "presidio"`).
 
     Parameters
     ----------
@@ -358,55 +560,74 @@ def remove_pii(
             - "whitelist": list[str]      — strings preserved despite detection
             - "redaction_list": list[str] — strings always redacted
             - "ner_model": str            — override default NER model
+            - "recognizer": "legacy" | "presidio"
+                  Default "legacy". When "presidio", runs Microsoft Presidio
+                  in place of the legacy regex+NER stages. Falls back to
+                  legacy with a logged warning if presidio isn't installed.
+            - "region_packs": list[str]
+                  Opt-in regional recognizer packs. Currently supported:
+                  "india" (Aadhaar with Verhoeff validation, PAN, Indian
+                  mobile, vehicle registration).
     use_ner : bool
-        If False, run regex + custom only. Useful in tests / fast paths.
+        If False, skip the HF NER stage in the legacy backend. (Presidio
+        backend already includes its own spaCy NER.)
 
     Returns
     -------
     (cleaned_text, redaction_report)
-        `redaction_report` is a dict with `summary`, `total`, and `events`.
+        `redaction_report` is a dict with `summary`, `total`, `events`, and
+        `recognizer_used` ("legacy" | "presidio").
     """
     config = config or {}
     whitelist: List[str] = list(config.get("whitelist", []) or [])
     redaction_list: List[str] = list(config.get("redaction_list", []) or [])
     ner_model: str = config.get("ner_model", "dslim/bert-base-NER")
+    requested_recognizer: str = (config.get("recognizer") or "legacy").lower()
+    region_packs: List[str] = list(config.get("region_packs", []) or [])
 
-    # --- Stage 1: regex
-    regex_spans = _regex_spans(corpus, whitelist)
+    presidio_spans: Optional[List[Tuple[int, int, str, str, str]]] = None
+    if requested_recognizer == "presidio":
+        presidio_spans = _presidio_spans(corpus, whitelist, region_packs)
 
-    # --- Stage 2: NER
-    ner_spans: List[Tuple[int, int, str, str, str]] = []
-    if use_ner:
-        ner_spans = _ner_spans(corpus, whitelist, ner_model)
-        if ner_spans:
-            ner_spans += _carry_forward_names(corpus, ner_spans, whitelist)
+    if presidio_spans is not None:
+        # Presidio replaces the regex+NER stages. Custom-list still applies.
+        recognizer_used = "presidio"
+        detection_spans = presidio_spans
+    else:
+        recognizer_used = "legacy"
+        # Stage 1: regex (core + region packs)
+        regex_spans = _regex_spans(corpus, whitelist, region_packs=region_packs)
 
-    # --- Stage 3: custom redaction (force)
+        # Stage 2: HF NER
+        ner_spans: List[Tuple[int, int, str, str, str]] = []
+        if use_ner:
+            ner_spans = _ner_spans(corpus, whitelist, ner_model)
+            if ner_spans:
+                ner_spans += _carry_forward_names(corpus, ner_spans, whitelist)
+
+        detection_spans = regex_spans + ner_spans
+
+    # Stage 3: custom redaction (force) — same for both backends.
     custom_spans = _custom_spans(corpus, redaction_list, whitelist)
 
-    # Custom wins on overlap with regex/NER, so feed it first into the
-    # resolver (specificity table already encodes this).
-    all_spans = custom_spans + regex_spans + ner_spans
+    # Custom wins on overlap, so feed it first into the resolver.
+    all_spans = custom_spans + detection_spans
     resolved = _resolve_overlapping_spans(all_spans)
 
     cleaned, events = _apply_replacements(corpus, resolved)
-    report = RedactionReport(redactions=events)
+    report_dict = RedactionReport(redactions=events).to_dict()
+    report_dict["recognizer_used"] = recognizer_used
+    report_dict["region_packs"] = region_packs
 
     # Transparency log — emit one INFO line per redaction.
     for ev in events:
-        logger.info(
-            "Redacted %s (%s) -> %s",
-            ev.category,
-            ev.source,
-            ev.replacement,
-        )
+        logger.info("Redacted %s (%s) -> %s", ev.category, ev.source, ev.replacement)
     logger.info(
-        "PII removal complete: %d redactions across %d categories.",
-        len(events),
-        len(report.summary()),
+        "PII removal complete: %d redactions across %d categories (recognizer=%s, region_packs=%s).",
+        len(events), len(report_dict["summary"]), recognizer_used, region_packs or "[]",
     )
 
-    return cleaned, report.to_dict()
+    return cleaned, report_dict
 
 
 # Backwards-compatible alias for code that imports `clean_corpus`.

@@ -31,6 +31,16 @@
         "ner_model_choice": {
           "type": "string",
           "description": "Hugging Face model identifier for the NER step. Default: 'dslim/bert-base-NER'."
+        },
+        "recognizer": {
+          "type": "string",
+          "description": "Recognizer backend. 'legacy' (default) is the regex + dslim NER pipeline. 'presidio' uses Microsoft Presidio (50+ entity types, validated detection, confidence scores). Falls back to legacy with a warning if presidio isn't installed.",
+          "enum": ["legacy", "presidio"]
+        },
+        "region_packs": {
+          "type": "array",
+          "description": "Optional region-specific recognizer packs. Currently supported: 'india' (Aadhaar with Verhoeff validation, PAN, Indian mobile, vehicle registration). Apply to both backends.",
+          "items": { "type": "string", "enum": ["india"] }
         }
       }
     },
