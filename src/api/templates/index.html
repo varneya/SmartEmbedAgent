@@ -100,6 +100,12 @@
     <!-- Results -->
     <section id="results" class="hidden mt-6 space-y-4">
 
+      <!-- Notes (fallback warnings, file-count summary, etc.) -->
+      <div id="notes-block" class="hidden bg-amber-50 border border-amber-200 rounded-xl p-4 text-sm text-amber-900">
+        <div class="font-medium mb-1">ℹ️ Run notes</div>
+        <ul id="notes-list" class="list-disc list-inside space-y-1"></ul>
+      </div>
+
       <!-- Top recommendation -->
       <div class="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
         <div class="text-xs text-slate-500 uppercase tracking-wide mb-1">🧭 Top recommendation</div>
@@ -294,6 +300,22 @@
     function render(resp) {
       const rec = resp.recommendation;
       const top = (rec.recommended_models || [])[0] || {};
+
+      // Notes (fallback warnings, file-count, etc.)
+      const notes = resp.notes || [];
+      const notesBlock = document.getElementById('notes-block');
+      const notesList = document.getElementById('notes-list');
+      notesList.innerHTML = '';
+      if (notes.length) {
+        notes.forEach(n => {
+          const li = document.createElement('li');
+          li.textContent = n;
+          notesList.appendChild(li);
+        });
+        notesBlock.classList.remove('hidden');
+      } else {
+        notesBlock.classList.add('hidden');
+      }
 
       // Top
       document.getElementById('top-name').textContent = top.name || 'n/a';

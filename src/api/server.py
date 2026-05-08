@@ -22,7 +22,7 @@ import sys
 import tempfile
 import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 # Make the project root importable when running `python -m src.api.server`
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -146,11 +146,15 @@ def _load_text_for_request(corpus_paths: Optional[List[str]],
 
 
 def _run_recommendation(corpus: str, config: Dict[str, Any],
-                        use_llm: bool) -> Dict[str, Any]:
+                        use_llm: bool) -> Tuple[Dict[str, Any], List[str]]:
+    """Returns (recommendation, notes). Notes carry user-visible signals
+    such as 'LLM requested but fell back to heuristic because …' so the
+    UI never silently substitutes a different code path."""
     pii_cfg = extract_pii_config(config)
+    notes: List[str] = []
     if not use_llm:
-        return run_pipeline_no_llm(corpus, user_config=pii_cfg)
-    # Agentic path — try the LLM, fall back cleanly on any error.
+        return run_pipeline_no_llm(corpus, user_config=pii_cfg), notes
+    # Agentic path — try the LLM, fall back cleanly with a visible note.
     try:
         executor = build_agent(corpus=corpus, user_config=pii_cfg, verbose=False)
         response = executor.invoke({
@@ -159,20 +163,37 @@ def _run_recommendation(corpus: str, config: Dict[str, Any],
         })
         output = response.get("output", "") if isinstance(response, dict) else str(response)
         try:
-            return json.loads(output)
+            return json.loads(output), notes
         except (TypeError, json.JSONDecodeError):
-            # Agent returned non-JSON — fall back to heuristic so the caller
-            # always gets a structured response.
-            return run_pipeline_no_llm(corpus, user_config=pii_cfg)
-    except Exception:
+            notes.append("LLM agent returned non-JSON; used deterministic heuristic instead.")
+            return run_pipeline_no_llm(corpus, user_config=pii_cfg), notes
+    except ModuleNotFoundError as e:
+        notes.append(
+            f"LLM requested but '{e.name}' not installed. Run "
+            "`pip install -r requirements.txt` to enable the agentic path. "
+            "Used deterministic heuristic instead."
+        )
+        return run_pipeline_no_llm(corpus, user_config=pii_cfg), notes
+    except Exception as e:
         traceback.print_exc()
-        return run_pipeline_no_llm(corpus, user_config=pii_cfg)
+        notes.append(f"LLM agent failed ({type(e).__name__}: {e}). Used deterministic heuristic instead.")
+        return run_pipeline_no_llm(corpus, user_config=pii_cfg), notes
 
 
 # ---------------------------------------------------------------------------
 # Routes
 # ---------------------------------------------------------------------------
+@app.get("/favicon.ico")
+def favicon() -> Any:
+    """Avoid noisy 404s in the access log when browsers auto-fetch /favicon.ico.
+    Returning 204 (no content) is the conventional 'I have no favicon, please
+    stop asking' response — cheaper than serving an actual icon."""
+    from fastapi.responses import Response
+    return Response(status_code=204)
+
+
 @app.get("/healthz")
+@app.get("/api/health")
 def healthz() -> Dict[str, Any]:
     """Liveness check + reachability info for downstream services."""
     import urllib.request
@@ -206,13 +227,13 @@ def recommend(req: RecommendRequest) -> RecommendResponse:
     config = _resolve_config(req.config, req.config_path)
     _validate_or_400(config)
     corpus = _load_text_for_request(req.corpus_paths, req.corpus_text)
-    rec = _run_recommendation(corpus, config, req.use_llm)
+    rec, notes = _run_recommendation(corpus, config, req.use_llm)
     return RecommendResponse(
         recommendation=rec,
         config_used=config,
         used_llm=bool(req.use_llm),
         markdown_report=render_markdown_report(rec),
-        notes=[],
+        notes=notes,
     )
 
 
@@ -255,13 +276,14 @@ async def recommend_upload(
             raise HTTPException(status_code=400, detail="No valid files uploaded.")
 
         corpus = load_corpus(saved_paths)
-        rec = _run_recommendation(corpus, config, use_llm)
+        rec, run_notes = _run_recommendation(corpus, config, use_llm)
         return RecommendResponse(
             recommendation=rec,
             config_used=config,
             used_llm=bool(use_llm),
             markdown_report=render_markdown_report(rec),
-            notes=[f"Analyzed {len(saved_paths)} uploaded file(s) totalling {len(corpus):,} chars."],
+            notes=[f"Analyzed {len(saved_paths)} uploaded file(s) totalling {len(corpus):,} chars."]
+                  + run_notes,
         )
     finally:
         # Best-effort cleanup; harmless if it races.
@@ -283,7 +305,7 @@ def recommend_markdown_demo() -> str:
     smoke-testing the install."""
     sample_corpus = (PROJECT_ROOT / "data" / "sample_short.txt").read_text(encoding="utf-8")
     config = json.loads(SAMPLE_CONFIG_PATH.read_text(encoding="utf-8"))
-    rec = _run_recommendation(sample_corpus, config, use_llm=False)
+    rec, _notes = _run_recommendation(sample_corpus, config, use_llm=False)
     return render_markdown_report(rec)
 
 
