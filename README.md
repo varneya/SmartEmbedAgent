@@ -290,7 +290,12 @@ For browser users or programmatic API consumers, the same recommender is exposed
 
 ```bash
 pip install -r requirements-api.txt   # fastapi + uvicorn + multipart, ~30 MB
-smart-embed-agent-serve                # serves on http://localhost:8000
+
+# Easiest — run the module directly (works without a package install):
+python -m src.api.server                # serves on http://127.0.0.1:8000
+
+# Or, after a package install (`pip install -e .`), use the console-script:
+smart-embed-agent-serve
 ```
 
 Open `http://localhost:8000` in a browser for the upload-and-recommend UI (drag-drop a corpus file, optionally toggle the LLM agent, see ranked models, index size, throughput estimate, reranker, language profile, and download the Markdown report).
