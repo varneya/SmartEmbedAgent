@@ -41,8 +41,45 @@ except ImportError as e:
     ) from e
 
 # Import the existing project guts — zero changes required to those modules.
+import re
+
 from main import load_corpus, render_markdown_report  # noqa: E402
 from src.agent_orchestrator import build_agent, run_pipeline_no_llm  # noqa: E402
+
+
+def _extract_json(text: str) -> Optional[Dict[str, Any]]:
+    """Salvage JSON from imperfect LLM output. Small Ollama models often
+    wrap structured output in markdown code fences ('```json ... ```'),
+    add a preamble ('Here is the recommendation:'), or trail with prose
+    after the closing brace. We try in order:
+
+      1. Strict json.loads on the raw text.
+      2. Strip ```json ... ``` or ``` ... ``` fences and retry.
+      3. Find the first '{' and the last '}' and try the substring.
+
+    Returns the parsed dict or None. None means we should fall back.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+    candidates: List[str] = [text.strip()]
+
+    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
+    if fence_match:
+        candidates.append(fence_match.group(1))
+
+    first = text.find("{")
+    last = text.rfind("}")
+    if first != -1 and last != -1 and last > first:
+        candidates.append(text[first:last + 1])
+
+    for c in candidates:
+        try:
+            parsed = json.loads(c)
+            if isinstance(parsed, dict):
+                return parsed
+        except (TypeError, json.JSONDecodeError):
+            continue
+    return None
 from src.config_validator import (  # noqa: E402
     DEFAULT_SCHEMA_PATH,
     extract_pii_config,
@@ -162,11 +199,32 @@ def _run_recommendation(corpus: str, config: Dict[str, Any],
                      "then corpus_analyzer, then output the final structured JSON recommendation.",
         })
         output = response.get("output", "") if isinstance(response, dict) else str(response)
-        try:
-            return json.loads(output), notes
-        except (TypeError, json.JSONDecodeError):
-            notes.append("LLM agent returned non-JSON; used deterministic heuristic instead.")
-            return run_pipeline_no_llm(corpus, user_config=pii_cfg), notes
+        parsed = _extract_json(output)
+        # The LLM might return valid JSON that doesn't match our schema —
+        # e.g. small models often dump the LAST tool's output (corpus_analyzer's
+        # raw stats) and call that the answer. Require at least
+        # `recommended_models` to consider the response usable.
+        if isinstance(parsed, dict) and "recommended_models" in parsed:
+            return parsed, notes
+        if parsed is not None:
+            wrong_shape_keys = sorted(parsed.keys())[:6]
+            notes.append(
+                "LLM agent returned valid JSON but with the wrong shape "
+                f"(top-level keys: {wrong_shape_keys}). This typically means "
+                "the model dumped the last tool's output instead of synthesizing "
+                "a recommendation. Used deterministic heuristic instead. "
+                "Try a stronger model (qwen2.5:32b, llama3.3:70b) via "
+                "SMARTEMBED_LLM_MODEL."
+            )
+        else:
+            clipped = output.strip().replace("\n", " ")[:140]
+            notes.append(
+                "LLM agent returned non-JSON output (no JSON found). "
+                f"Sample: '{clipped}…'. Used deterministic heuristic instead. "
+                "Try a stronger model (qwen2.5:32b, llama3.3:70b) via "
+                "SMARTEMBED_LLM_MODEL."
+            )
+        return run_pipeline_no_llm(corpus, user_config=pii_cfg), notes
     except ModuleNotFoundError as e:
         notes.append(
             f"LLM requested but '{e.name}' not installed. Run "

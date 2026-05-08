@@ -313,23 +313,25 @@ Workflow (in this order):
   Step 3: Call corpus_analyzer.
   Step 4: Optionally call web_search for guideline/benchmark questions.
   Step 5: Reason about candidate models. Then output a final answer as a
-          single JSON object with these exact fields:
+          single JSON object with these exact fields. (Curly braces below
+          are doubled because this string is a LangChain prompt template;
+          the doubled braces render as single braces at runtime.)
 
-  {
+  {{
     "recommended_models": [
-      {"name": "...", "rank": 1, "rationale": "..."},
+      {{"name": "...", "rank": 1, "rationale": "..."}},
       ...
     ],
     "reasoning_explanation": "Free-form explanation of how hardware, PII volume, and corpus shape drove the choice.",
-    "chunking_strategy": {
+    "chunking_strategy": {{
       "needed": true|false,
       "chunk_size_tokens": int|null,
       "overlap_tokens": int|null,
       "rationale": "..."
-    },
+    }},
     "fine_tuning_advice": "Whether to fine-tune, and why or why not.",
     "hardware_fit_analysis": "How the recommended top model fits the user's hardware."
-  }
+  }}
 
 Reasoning principles:
   - All candidate models are open-source and run locally. Pick the one that
@@ -338,7 +340,7 @@ Reasoning principles:
     chunk. Don't default to the largest model.
   - On CPU-only hardware (compute_device = "cpu"), prefer small models
     (MiniLM, BGE-small) over large transformers. On accelerated hardware
-    (compute_device in {"cuda", "rocm", "mps"}) larger models like
+    (compute_device in cuda / rocm / mps) larger models like
     BGE-large, BGE-M3, or mxbai-embed-large are viable; on Apple Silicon
     (mps) the relevant memory budget is unified RAM, not a separate VRAM
     figure.
