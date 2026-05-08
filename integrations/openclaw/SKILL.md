@@ -80,6 +80,18 @@ Substitute `<USER_PATH>` with the absolute corpus path the user gave. Run it onc
 
 If the exec returns a non-zero exit and stderr mentions `ModuleNotFoundError: psutil` or similar, the python interpreter doesn't have the SmartEmbedAgent deps. Tell the user to install them: `cd "$SMARTEMBED_HOME" && python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt`. Do NOT attempt to install packages yourself.
 
+**Indian PII detection is on by default** in `sample_config.json` (`region_packs: ["india"]`) — Aadhaar (Verhoeff-validated), PAN, Indian mobile, and vehicle registration numbers are caught by the regex backend without any extra install.
+
+**Microsoft Presidio backend** (50+ entity types, validated detection, confidence scores) is available as an optional upgrade. To enable, the user runs once:
+
+```bash
+cd "$SMARTEMBED_HOME"
+pip install -r requirements-presidio.txt
+python -m spacy download en_core_web_lg
+```
+
+…then sets `pii_settings.recognizer: "presidio"` in their config. If they ask you (the agent) to enable Presidio, **surface the commands above and let them run the install themselves** — do not auto-pip-install on their behalf.
+
 If the user pasted raw text instead of a path, first write it to `/tmp/se_corpus.txt` using the `write` tool, then pass that path.
 
 The command above already passes `--no_llm` because YOU (the OpenClaw agent) are the LLM in this loop — running a second LLM inside `exec` is redundant, slow, and busts the context window. Do not remove the `--no_llm` flag.

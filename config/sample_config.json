@@ -15,7 +15,10 @@
       "GitHub"
     ],
     "redaction_aggressiveness": "medium",
-    "ner_model_choice": "dslim/bert-base-NER"
+    "ner_model_choice": "dslim/bert-base-NER",
+    "_recognizer_comment": "'legacy' = regex + dslim NER (default, no extra install). Switch to 'presidio' after running: pip install -r requirements-presidio.txt && python -m spacy download en_core_web_lg",
+    "recognizer": "legacy",
+    "region_packs": ["india"]
   },
 
   "model_preferences": {
