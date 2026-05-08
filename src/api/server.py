@@ -182,6 +182,33 @@ def _load_text_for_request(corpus_paths: Optional[List[str]],
         raise HTTPException(status_code=400, detail=str(e))
 
 
+# Fields we let the LLM override on top of the deterministic heuristic
+# when use_llm=True. Everything else (index_estimate,
+# reranker_recommendation, language_profile) stays deterministic — those
+# are just math/lookup over corpus stats and gain nothing from LLM
+# rephrasing, but they DO get lost if the LLM doesn't know to emit them.
+_LLM_OVERRIDABLE_FIELDS = {
+    "recommended_models",
+    "reasoning_explanation",
+    "chunking_strategy",
+    "fine_tuning_advice",
+    "hardware_fit_analysis",
+}
+
+
+def _merge_llm_into_heuristic(heuristic: Dict[str, Any],
+                              llm: Dict[str, Any]) -> Dict[str, Any]:
+    """Start from the deterministic recommendation (which has every field,
+    including the new data-scientist additions). Overlay only the LLM's
+    judgment fields. Anything the LLM didn't emit keeps the heuristic
+    value, so the response is always shape-complete."""
+    merged = dict(heuristic)
+    for key in _LLM_OVERRIDABLE_FIELDS:
+        if key in llm and llm[key]:
+            merged[key] = llm[key]
+    return merged
+
+
 def _run_recommendation(corpus: str, config: Dict[str, Any],
                         use_llm: bool) -> Tuple[Dict[str, Any], List[str]]:
     """Returns (recommendation, notes). Notes carry user-visible signals
@@ -189,9 +216,13 @@ def _run_recommendation(corpus: str, config: Dict[str, Any],
     UI never silently substitutes a different code path."""
     pii_cfg = extract_pii_config(config)
     notes: List[str] = []
+    # Always compute the deterministic recommendation. It populates every
+    # field the API contract promises (incl. index_estimate, reranker,
+    # language_profile). The LLM either overrides the judgment fields or
+    # we fall back to it entirely.
+    heuristic = run_pipeline_no_llm(corpus, user_config=pii_cfg)
     if not use_llm:
-        return run_pipeline_no_llm(corpus, user_config=pii_cfg), notes
-    # Agentic path — try the LLM, fall back cleanly with a visible note.
+        return heuristic, notes
     try:
         executor = build_agent(corpus=corpus, user_config=pii_cfg, verbose=False)
         response = executor.invoke({
@@ -205,7 +236,10 @@ def _run_recommendation(corpus: str, config: Dict[str, Any],
         # raw stats) and call that the answer. Require at least
         # `recommended_models` to consider the response usable.
         if isinstance(parsed, dict) and "recommended_models" in parsed:
-            return parsed, notes
+            # Merge the LLM's judgment fields onto the deterministic
+            # baseline so index_estimate / reranker / language_profile are
+            # always present.
+            return _merge_llm_into_heuristic(heuristic, parsed), notes
         if parsed is not None:
             wrong_shape_keys = sorted(parsed.keys())[:6]
             notes.append(
@@ -224,18 +258,18 @@ def _run_recommendation(corpus: str, config: Dict[str, Any],
                 "Try a stronger model (qwen2.5:32b, llama3.3:70b) via "
                 "SMARTEMBED_LLM_MODEL."
             )
-        return run_pipeline_no_llm(corpus, user_config=pii_cfg), notes
+        return heuristic, notes
     except ModuleNotFoundError as e:
         notes.append(
             f"LLM requested but '{e.name}' not installed. Run "
             "`pip install -r requirements.txt` to enable the agentic path. "
             "Used deterministic heuristic instead."
         )
-        return run_pipeline_no_llm(corpus, user_config=pii_cfg), notes
+        return heuristic, notes
     except Exception as e:
         traceback.print_exc()
         notes.append(f"LLM agent failed ({type(e).__name__}: {e}). Used deterministic heuristic instead.")
-        return run_pipeline_no_llm(corpus, user_config=pii_cfg), notes
+        return heuristic, notes
 
 
 # ---------------------------------------------------------------------------
