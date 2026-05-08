@@ -1,0 +1,13 @@
+# FastAPI HTTP front-end for SmartEmbedAgent.
+#
+# Install:  pip install -r requirements-api.txt
+# Run:      smart-embed-agent-serve  (or python -m src.api.server)
+# Browse:   http://localhost:8000
+#
+# Adds ~30MB. The CLI, OpenClaw skill, and Python-library entry points
+# all continue to work without this — the API is purely additive.
+
+fastapi>=0.110.0,<0.120.0
+uvicorn[standard]>=0.27.0,<0.40.0
+python-multipart>=0.0.9,<1.0.0
+jinja2>=3.1.0,<4.0.0

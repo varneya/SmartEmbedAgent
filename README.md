@@ -284,6 +284,44 @@ Produces (excerpt — full schema):
 
 Full sample runs are in [`docs/DEMO_OUTPUT.md`](docs/DEMO_OUTPUT.md).
 
+## Run as an HTTP service (FastAPI)
+
+For browser users or programmatic API consumers, the same recommender is exposed over HTTP with a small FastAPI app and a Tailwind-styled in-browser UI. Optional install — purely additive to the CLI / library / OpenClaw skill.
+
+```bash
+pip install -r requirements-api.txt   # fastapi + uvicorn + multipart, ~30 MB
+smart-embed-agent-serve                # serves on http://localhost:8000
+```
+
+Open `http://localhost:8000` in a browser for the upload-and-recommend UI (drag-drop a corpus file, optionally toggle the LLM agent, see ranked models, index size, throughput estimate, reranker, language profile, and download the Markdown report).
+
+Programmatic use:
+
+```bash
+# JSON in / JSON out
+curl -X POST http://localhost:8000/recommend \
+  -H 'Content-Type: application/json' \
+  -d '{"corpus_text":"alice@example.com is great","use_llm":false}'
+
+# Multipart upload
+curl -X POST http://localhost:8000/recommend/upload \
+  -F files=@notes.csv -F files=@reviews.md -F use_llm=false
+
+# Auto-generated OpenAPI docs
+open http://localhost:8000/docs
+```
+
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/` | GET | In-browser HTML form |
+| `/recommend` | POST | JSON body: `corpus_text` or `corpus_paths`, optional inline `config`, `use_llm` |
+| `/recommend/upload` | POST | Multipart files (+ optional config_file). Same response shape |
+| `/recommend/markdown` | GET | Convenience: runs the bundled sample corpus, returns Markdown |
+| `/healthz` | GET | Liveness + reports whether Ollama is reachable |
+| `/docs` | GET | FastAPI's auto-generated OpenAPI / Swagger UI |
+
+Env vars: `HOST` (default `127.0.0.1`), `PORT` (default `8000`), `RELOAD` (default `false`).
+
 ## Chat-app integration (WhatsApp / Telegram / Signal via OpenClaw)
 
 If you have [OpenClaw](https://openclaw.ai) installed, this repo ships a ready-to-use skill that lets you ask for recommendations from any chat app OpenClaw supports. The flow:

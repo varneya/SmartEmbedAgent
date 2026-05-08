@@ -1,0 +1,388 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>SmartEmbedAgent</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif; }
+    .dropzone-active { border-color: rgb(59 130 246); background-color: rgb(239 246 255); }
+    .stat-card { transition: transform 0.15s ease; }
+    .stat-card:hover { transform: translateY(-2px); }
+    pre { tab-size: 2; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800 antialiased">
+
+  <!-- Header -->
+  <header class="border-b border-slate-200 bg-white">
+    <div class="max-w-5xl mx-auto px-6 py-5 flex items-center justify-between">
+      <div>
+        <h1 class="text-xl font-semibold tracking-tight">🧭 SmartEmbedAgent</h1>
+        <p class="text-sm text-slate-500">Local embedding-model recommender · v{{ version }}</p>
+      </div>
+      <a href="https://github.com/varneya/SmartEmbedAgent" target="_blank"
+         class="text-sm text-slate-500 hover:text-slate-900 transition">GitHub ↗</a>
+    </div>
+  </header>
+
+  <main class="max-w-5xl mx-auto px-6 py-8">
+
+    <!-- Input panel -->
+    <section id="input-panel" class="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="text-lg font-medium">Analyze a corpus</h2>
+        <div class="text-xs text-slate-500">
+          Accepted: <code class="px-1.5 py-0.5 bg-slate-100 rounded text-slate-700">.txt</code>
+          <code class="px-1.5 py-0.5 bg-slate-100 rounded text-slate-700">.md</code>
+          <code class="px-1.5 py-0.5 bg-slate-100 rounded text-slate-700">.csv</code>
+          <code class="px-1.5 py-0.5 bg-slate-100 rounded text-slate-700">.json</code>
+        </div>
+      </div>
+
+      <!-- Tabs -->
+      <div class="flex gap-2 mb-4 border-b border-slate-200">
+        <button id="tab-files" class="tab px-4 py-2 text-sm font-medium border-b-2 border-blue-600 text-blue-600">
+          Upload files
+        </button>
+        <button id="tab-text" class="tab px-4 py-2 text-sm font-medium border-b-2 border-transparent text-slate-500 hover:text-slate-800">
+          Paste text
+        </button>
+      </div>
+
+      <!-- File upload -->
+      <div id="files-input" class="block">
+        <label id="dropzone"
+               for="file"
+               class="block border-2 border-dashed border-slate-300 rounded-lg p-10 text-center cursor-pointer hover:border-slate-400 transition">
+          <div class="text-4xl mb-2">📂</div>
+          <div class="text-sm text-slate-600 mb-1">
+            <span class="text-blue-600 font-medium">Click to choose</span> or drag and drop
+          </div>
+          <div class="text-xs text-slate-400">One or more files</div>
+          <input id="file" type="file" multiple class="hidden">
+        </label>
+        <div id="file-list" class="mt-3 space-y-1 text-sm text-slate-700"></div>
+      </div>
+
+      <!-- Text input -->
+      <div id="text-input" class="hidden">
+        <textarea id="text-area"
+                  rows="8"
+                  placeholder="Paste your corpus here. Documents separated by blank lines."
+                  class="w-full border border-slate-300 rounded-lg p-3 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500"></textarea>
+      </div>
+
+      <!-- Options -->
+      <div class="flex items-center justify-between mt-5">
+        <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer">
+          <input id="use-llm" type="checkbox" class="rounded border-slate-300 text-blue-600 focus:ring-blue-500">
+          <span>Use local LLM agent (Ollama, ~30s)</span>
+          <span class="text-xs text-slate-400">— off = fast deterministic heuristic</span>
+        </label>
+        <button id="submit"
+                class="px-5 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition">
+          Recommend a model
+        </button>
+      </div>
+    </section>
+
+    <!-- Loading state -->
+    <section id="loading" class="hidden mt-6 bg-white rounded-xl border border-slate-200 p-8 text-center">
+      <div class="inline-block animate-spin h-6 w-6 border-2 border-slate-300 border-t-blue-600 rounded-full"></div>
+      <div class="text-sm text-slate-600 mt-3">Running recommender…</div>
+    </section>
+
+    <!-- Error -->
+    <section id="error" class="hidden mt-6 bg-rose-50 border border-rose-200 text-rose-800 rounded-xl p-4 text-sm"></section>
+
+    <!-- Results -->
+    <section id="results" class="hidden mt-6 space-y-4">
+
+      <!-- Top recommendation -->
+      <div class="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
+        <div class="text-xs text-slate-500 uppercase tracking-wide mb-1">🧭 Top recommendation</div>
+        <div class="flex items-baseline justify-between flex-wrap gap-2">
+          <h3 id="top-name" class="text-2xl font-mono font-semibold text-slate-900"></h3>
+          <div id="top-badges" class="flex gap-2"></div>
+        </div>
+        <p id="top-rationale" class="text-sm text-slate-600 mt-3"></p>
+
+        <!-- Prefix templates (only shown when present) -->
+        <div id="prefix-block" class="hidden mt-4 bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm">
+          <div class="font-medium text-amber-900 mb-1">📝 Prompt prefixes — required for full retrieval quality</div>
+          <div class="space-y-1 font-mono text-xs">
+            <div>Index docs with: <code id="embed-prefix" class="bg-white px-1.5 py-0.5 rounded border border-amber-200"></code></div>
+            <div>Embed queries with: <code id="query-prefix" class="bg-white px-1.5 py-0.5 rounded border border-amber-200"></code></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Stat cards row -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div class="stat-card bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
+          <div class="text-xs text-slate-500 uppercase tracking-wide mb-1">📊 Index estimate</div>
+          <div id="index-size" class="text-2xl font-semibold text-slate-900"></div>
+          <div id="index-detail" class="text-xs text-slate-500 mt-1"></div>
+        </div>
+        <div class="stat-card bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
+          <div class="text-xs text-slate-500 uppercase tracking-wide mb-1">⚙️ Chunking</div>
+          <div id="chunk-headline" class="text-2xl font-semibold text-slate-900"></div>
+          <div id="chunk-detail" class="text-xs text-slate-500 mt-1"></div>
+        </div>
+        <div class="stat-card bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
+          <div class="text-xs text-slate-500 uppercase tracking-wide mb-1">📚 Language</div>
+          <div id="lang-headline" class="text-2xl font-semibold text-slate-900"></div>
+          <div id="lang-detail" class="text-xs text-slate-500 mt-1"></div>
+        </div>
+      </div>
+
+      <!-- Hardware fit -->
+      <div class="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
+        <div class="text-xs text-slate-500 uppercase tracking-wide mb-1">💾 Hardware fit</div>
+        <p id="hw-text" class="text-sm text-slate-700"></p>
+      </div>
+
+      <!-- Reranker -->
+      <div class="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
+        <div class="text-xs text-slate-500 uppercase tracking-wide mb-1">🎚️ Suggested reranker</div>
+        <div class="flex items-baseline justify-between flex-wrap gap-2">
+          <h4 id="rerank-name" class="text-lg font-mono font-medium"></h4>
+          <span id="rerank-size" class="text-xs text-slate-500"></span>
+        </div>
+        <p id="rerank-why" class="text-sm text-slate-600 mt-2"></p>
+      </div>
+
+      <!-- Fine-tuning -->
+      <div class="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
+        <div class="text-xs text-slate-500 uppercase tracking-wide mb-1">🎯 Fine-tuning advice</div>
+        <p id="ft-text" class="text-sm text-slate-700"></p>
+      </div>
+
+      <!-- All ranked models -->
+      <div class="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
+        <div class="text-xs text-slate-500 uppercase tracking-wide mb-3">🥇 Full ranking</div>
+        <ol id="all-models" class="space-y-2"></ol>
+      </div>
+
+      <!-- Downloads + raw JSON -->
+      <div class="flex flex-wrap items-center gap-3">
+        <button id="download-md"
+                class="text-sm px-4 py-2 bg-slate-900 text-white rounded-lg hover:bg-slate-700 transition">
+          Download Markdown report
+        </button>
+        <button id="download-json"
+                class="text-sm px-4 py-2 bg-slate-200 text-slate-800 rounded-lg hover:bg-slate-300 transition">
+          Download raw JSON
+        </button>
+        <button id="toggle-json"
+                class="text-sm text-slate-500 hover:text-slate-800 transition">
+          ⌃ Show raw JSON
+        </button>
+      </div>
+
+      <pre id="raw-json"
+           class="hidden bg-slate-900 text-slate-100 text-xs rounded-xl p-4 overflow-x-auto"></pre>
+
+    </section>
+
+    <footer class="mt-12 text-center text-xs text-slate-400">
+      Local · on-device · no API keys · <a class="hover:text-slate-700" href="/healthz">/healthz</a>
+    </footer>
+  </main>
+
+  <script>
+    // Tab switching
+    const tabFiles = document.getElementById('tab-files');
+    const tabText = document.getElementById('tab-text');
+    const filesInput = document.getElementById('files-input');
+    const textInput = document.getElementById('text-input');
+    function activate(tab, panel) {
+      [tabFiles, tabText].forEach(t => {
+        t.classList.remove('border-blue-600', 'text-blue-600');
+        t.classList.add('border-transparent', 'text-slate-500');
+      });
+      tab.classList.add('border-blue-600', 'text-blue-600');
+      tab.classList.remove('border-transparent', 'text-slate-500');
+      [filesInput, textInput].forEach(p => p.classList.add('hidden'));
+      panel.classList.remove('hidden');
+    }
+    tabFiles.onclick = () => activate(tabFiles, filesInput);
+    tabText.onclick = () => activate(tabText, textInput);
+
+    // File handling: drag-drop + show selected list
+    const fileInput = document.getElementById('file');
+    const fileList = document.getElementById('file-list');
+    const dropzone = document.getElementById('dropzone');
+    function renderFileList(files) {
+      fileList.innerHTML = '';
+      Array.from(files).forEach(f => {
+        const row = document.createElement('div');
+        row.className = 'flex items-center justify-between bg-slate-50 px-3 py-1.5 rounded';
+        row.innerHTML = `<span class="font-mono text-xs">${f.name}</span>
+                         <span class="text-xs text-slate-500">${(f.size/1024).toFixed(1)} KB</span>`;
+        fileList.appendChild(row);
+      });
+    }
+    fileInput.addEventListener('change', e => renderFileList(e.target.files));
+    ['dragenter','dragover'].forEach(ev =>
+      dropzone.addEventListener(ev, e => { e.preventDefault(); dropzone.classList.add('dropzone-active'); }));
+    ['dragleave','drop'].forEach(ev =>
+      dropzone.addEventListener(ev, e => { e.preventDefault(); dropzone.classList.remove('dropzone-active'); }));
+    dropzone.addEventListener('drop', e => {
+      e.preventDefault();
+      const dt = new DataTransfer();
+      Array.from(e.dataTransfer.files).forEach(f => dt.items.add(f));
+      fileInput.files = dt.files;
+      renderFileList(dt.files);
+    });
+
+    // Submit
+    const submitBtn = document.getElementById('submit');
+    const loading = document.getElementById('loading');
+    const errorBox = document.getElementById('error');
+    const results = document.getElementById('results');
+
+    let lastResp = null;
+
+    submitBtn.addEventListener('click', async () => {
+      errorBox.classList.add('hidden');
+      results.classList.add('hidden');
+      loading.classList.remove('hidden');
+      submitBtn.disabled = true;
+
+      try {
+        const useLlm = document.getElementById('use-llm').checked;
+        let resp;
+        if (filesInput.classList.contains('hidden')) {
+          // Text path
+          const text = document.getElementById('text-area').value.trim();
+          if (!text) throw new Error('Paste some text first.');
+          resp = await fetch('/recommend', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ corpus_text: text, use_llm: useLlm }),
+          });
+        } else {
+          if (fileInput.files.length === 0) throw new Error('Choose at least one file.');
+          const fd = new FormData();
+          for (const f of fileInput.files) fd.append('files', f);
+          fd.append('use_llm', useLlm ? 'true' : 'false');
+          resp = await fetch('/recommend/upload', { method: 'POST', body: fd });
+        }
+        const json = await resp.json();
+        if (!resp.ok) throw new Error(json.detail ? JSON.stringify(json.detail) : `HTTP ${resp.status}`);
+        lastResp = json;
+        render(json);
+      } catch (e) {
+        errorBox.textContent = `Error: ${e.message}`;
+        errorBox.classList.remove('hidden');
+      } finally {
+        loading.classList.add('hidden');
+        submitBtn.disabled = false;
+      }
+    });
+
+    // Render result
+    function badge(label, color = 'slate') {
+      const span = document.createElement('span');
+      span.className = `px-2 py-0.5 text-xs rounded-md font-medium bg-${color}-100 text-${color}-800`;
+      span.textContent = label;
+      return span;
+    }
+    function render(resp) {
+      const rec = resp.recommendation;
+      const top = (rec.recommended_models || [])[0] || {};
+
+      // Top
+      document.getElementById('top-name').textContent = top.name || 'n/a';
+      document.getElementById('top-rationale').textContent = top.rationale || '';
+      const badges = document.getElementById('top-badges');
+      badges.innerHTML = '';
+      if (top.dimension) badges.appendChild(badge(`dim ${top.dimension}`, 'blue'));
+      if (top.context_window) badges.appendChild(badge(`ctx ${top.context_window}`, 'indigo'));
+      if (top.size_mb) badges.appendChild(badge(`${top.size_mb} MB`, 'slate'));
+      if (top.multilingual) badges.appendChild(badge('multilingual', 'emerald'));
+
+      // Prefixes
+      if (top.embed_prefix || top.query_prefix) {
+        document.getElementById('prefix-block').classList.remove('hidden');
+        document.getElementById('embed-prefix').textContent = JSON.stringify(top.embed_prefix || '');
+        document.getElementById('query-prefix').textContent = JSON.stringify(top.query_prefix || '');
+      } else {
+        document.getElementById('prefix-block').classList.add('hidden');
+      }
+
+      // Stats
+      const ix = rec.index_estimate || {};
+      document.getElementById('index-size').textContent = ix.index_size_human || '—';
+      document.getElementById('index-detail').textContent =
+        ix.estimated_full_embed_seconds != null
+          ? `${ix.estimated_full_embed_seconds}s to embed · ~${ix.estimated_query_embed_ms}ms / query`
+          : '';
+
+      const cs = rec.chunking_strategy || {};
+      document.getElementById('chunk-headline').textContent = cs.needed ? 'Yes' : 'No';
+      document.getElementById('chunk-detail').textContent = cs.needed
+        ? `${cs.chunk_size_tokens} tokens · ${cs.overlap_tokens} overlap`
+        : (cs.rationale || '');
+
+      const lp = rec.language_profile || {};
+      const langs = lp.languages || [];
+      document.getElementById('lang-headline').textContent = langs.length
+        ? langs.map(L => `${L.code} ${(L.share*100).toFixed(0)}%`).slice(0, 2).join(' · ')
+        : 'unknown';
+      document.getElementById('lang-detail').textContent = lp.multilingual
+        ? 'multilingual — preferred multilingual embedders'
+        : (lp.detector ? `detector: ${lp.detector}` : '');
+
+      // HW
+      document.getElementById('hw-text').textContent = rec.hardware_fit_analysis || '';
+
+      // Reranker
+      const rr = rec.reranker_recommendation || {};
+      document.getElementById('rerank-name').textContent = rr.name || 'none';
+      document.getElementById('rerank-size').textContent = rr.size_mb ? `~${rr.size_mb} MB` : '';
+      document.getElementById('rerank-why').textContent = rr.why || '';
+
+      // Fine-tuning
+      document.getElementById('ft-text').textContent = rec.fine_tuning_advice || '';
+
+      // All models
+      const all = document.getElementById('all-models');
+      all.innerHTML = '';
+      (rec.recommended_models || []).forEach(m => {
+        const li = document.createElement('li');
+        li.className = 'border border-slate-200 rounded-lg p-3 text-sm';
+        li.innerHTML = `<span class="font-mono font-medium">${m.rank}. ${m.name}</span>
+                        <div class="text-xs text-slate-500 mt-1">${m.rationale || ''}</div>`;
+        all.appendChild(li);
+      });
+
+      // Raw JSON
+      document.getElementById('raw-json').textContent = JSON.stringify(rec, null, 2);
+      results.classList.remove('hidden');
+    }
+
+    // Toggle / downloads
+    document.getElementById('toggle-json').addEventListener('click', () => {
+      const el = document.getElementById('raw-json');
+      el.classList.toggle('hidden');
+    });
+    function download(filename, text, mime='text/plain') {
+      const blob = new Blob([text], { type: mime });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = filename;
+      a.click();
+      URL.revokeObjectURL(a.href);
+    }
+    document.getElementById('download-md').addEventListener('click', () =>
+      lastResp && download('recommendation.md', lastResp.markdown_report, 'text/markdown'));
+    document.getElementById('download-json').addEventListener('click', () =>
+      lastResp && download('recommendation.json', JSON.stringify(lastResp.recommendation, null, 2), 'application/json'));
+  </script>
+
+</body>
+</html>
