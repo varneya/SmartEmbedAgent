@@ -44,6 +44,7 @@ from src.agent_orchestrator import build_agent, run_pipeline_no_llm  # noqa: E40
 from src.config_validator import (  # noqa: E402
     DEFAULT_SCHEMA_PATH,
     extract_agent_settings,
+    extract_model_preferences,
     extract_pii_config,
     load_and_validate,
 )
@@ -388,6 +389,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     pii_cfg = extract_pii_config(config)
     agent_cfg = extract_agent_settings(config)
+    model_prefs = extract_model_preferences(config)
 
     # Step 2: load corpus.
     _step_announce(PIPELINE_STEPS[1], total_steps, 1)
@@ -408,7 +410,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         log.warning("--no_llm specified. Running deterministic heuristic pipeline.")
         _step_announce(PIPELINE_STEPS[2], total_steps, 2)
         _step_announce(PIPELINE_STEPS[3], total_steps, 3)
-        recommendation = run_pipeline_no_llm(corpus, user_config=pii_cfg)
+        recommendation = run_pipeline_no_llm(corpus, user_config=pii_cfg, task=model_prefs["task"])
     else:
         _step_announce(PIPELINE_STEPS[2], total_steps, 2)
         try:
@@ -422,7 +424,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             log.error("Failed to initialize agent: %s", e)
             log.debug(traceback.format_exc())
             log.warning("Falling back to deterministic heuristic.")
-            recommendation = run_pipeline_no_llm(corpus, user_config=pii_cfg)
+            recommendation = run_pipeline_no_llm(corpus, user_config=pii_cfg, task=model_prefs["task"])
         else:
             _step_announce(PIPELINE_STEPS[3], total_steps, 3)
             user_request = (
@@ -442,11 +444,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                 except (TypeError, json.JSONDecodeError):
                     log.warning("Agent output was not valid JSON; falling back to heuristic.")
                     log.debug("Raw agent output:\n%s", output)
-                    recommendation = run_pipeline_no_llm(corpus, user_config=pii_cfg)
+                    recommendation = run_pipeline_no_llm(corpus, user_config=pii_cfg, task=model_prefs["task"])
             except Exception as e:
                 log.error("LLM API call failed after retries: %s", e)
                 log.warning("Falling back to deterministic heuristic.")
-                recommendation = run_pipeline_no_llm(corpus, user_config=pii_cfg)
+                recommendation = run_pipeline_no_llm(corpus, user_config=pii_cfg, task=model_prefs["task"])
 
     # Step 5: write outputs.
     _step_announce(PIPELINE_STEPS[4], total_steps, 4)

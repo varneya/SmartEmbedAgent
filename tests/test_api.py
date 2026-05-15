@@ -131,6 +131,59 @@ class TestUploadEndpoint(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_API, "FastAPI extras not installed")
+class TestTaskOverride(unittest.TestCase):
+    """`task` flows through both /recommend and /recommend/upload."""
+
+    def setUp(self):
+        self.client = TestClient(app)
+
+    def test_recommend_with_task_clustering(self):
+        r = self.client.post("/recommend", json={
+            "corpus_text": "alice@example.com is great. The product works well for our team.",
+            "use_llm": False,
+            "task": "clustering",
+        })
+        self.assertEqual(r.status_code, 200, r.text)
+        rec = r.json()["recommendation"]
+        self.assertEqual(rec["task"], "clustering")
+        # Clustering should not surface a reranker model.
+        self.assertIsNone(rec["reranker_recommendation"]["name"])
+
+    def test_recommend_with_task_deduplication(self):
+        r = self.client.post("/recommend", json={
+            "corpus_text": "Customer feedback. Email me at alice@example.com.",
+            "use_llm": False,
+            "task": "deduplication",
+        })
+        self.assertEqual(r.status_code, 200, r.text)
+        rec = r.json()["recommendation"]
+        self.assertEqual(rec["task"], "deduplication")
+        # Symmetric task → no prompt prefixes carried.
+        for m in rec["recommended_models"]:
+            self.assertEqual(m["embed_prefix"], "")
+            self.assertEqual(m["query_prefix"], "")
+
+    def test_unknown_task_falls_back_with_note(self):
+        r = self.client.post("/recommend", json={
+            "corpus_text": "hello",
+            "use_llm": False,
+            "task": "fortune_telling",
+        })
+        self.assertEqual(r.status_code, 200, r.text)
+        body = r.json()
+        self.assertEqual(body["recommendation"]["task"], "retrieval")
+        self.assertTrue(any("Unknown task" in n for n in body["notes"]),
+                        f"expected an Unknown-task note in {body['notes']}")
+
+    def test_upload_with_task_form_field(self):
+        files = [("files", ("notes.txt", b"Quick text for clustering.\n", "text/plain"))]
+        r = self.client.post("/recommend/upload", files=files,
+                             data={"use_llm": "false", "task": "clustering"})
+        self.assertEqual(r.status_code, 200, r.text)
+        self.assertEqual(r.json()["recommendation"]["task"], "clustering")
+
+
+@unittest.skipUnless(HAS_API, "FastAPI extras not installed")
 class TestMarkdownDemo(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)

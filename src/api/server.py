@@ -82,9 +82,11 @@ def _extract_json(text: str) -> Optional[Dict[str, Any]]:
     return None
 from src.config_validator import (  # noqa: E402
     DEFAULT_SCHEMA_PATH,
+    extract_model_preferences,
     extract_pii_config,
     validate_config,
 )
+from src.agent_orchestrator import SUPPORTED_TASKS  # noqa: E402
 
 
 SAMPLE_CONFIG_PATH = PROJECT_ROOT / "config" / "sample_config.json"
@@ -130,6 +132,13 @@ class RecommendRequest(BaseModel):
         description="If True, invoke the Ollama-backed LangChain agent. "
                     "Requires Ollama running locally with a tool-calling model. "
                     "Default False = ~1-2s deterministic heuristic.",
+    )
+    task: Optional[str] = Field(
+        default=None,
+        description=("Workload type. One of: retrieval (default), classification, "
+                     "clustering, deduplication, similarity. Drives task-aware "
+                     "scoring, prefix suppression for symmetric tasks, and reranker "
+                     "recommendation. Overrides the value in `config.model_preferences.task`."),
     )
 
 
@@ -209,18 +218,34 @@ def _merge_llm_into_heuristic(heuristic: Dict[str, Any],
     return merged
 
 
-def _run_recommendation(corpus: str, config: Dict[str, Any],
-                        use_llm: bool) -> Tuple[Dict[str, Any], List[str]]:
+def _resolve_task(req_task: Optional[str], config: Dict[str, Any],
+                  notes: List[str]) -> str:
+    """Pick the task string, with precedence:  request override > config field
+    > legacy `target_use_case` > 'retrieval'. Unknown values are mapped back
+    to 'retrieval' with a note so the user sees what happened."""
+    chosen = req_task if req_task else extract_model_preferences(config)["task"]
+    if chosen not in SUPPORTED_TASKS:
+        notes.append(
+            f"Unknown task '{chosen}'. Falling back to 'retrieval'. "
+            f"Supported: {list(SUPPORTED_TASKS)}."
+        )
+        chosen = "retrieval"
+    return chosen
+
+
+def _run_recommendation(corpus: str, config: Dict[str, Any], use_llm: bool,
+                        task: Optional[str] = None) -> Tuple[Dict[str, Any], List[str]]:
     """Returns (recommendation, notes). Notes carry user-visible signals
     such as 'LLM requested but fell back to heuristic because …' so the
     UI never silently substitutes a different code path."""
     pii_cfg = extract_pii_config(config)
     notes: List[str] = []
+    resolved_task = _resolve_task(task, config, notes)
     # Always compute the deterministic recommendation. It populates every
     # field the API contract promises (incl. index_estimate, reranker,
-    # language_profile). The LLM either overrides the judgment fields or
-    # we fall back to it entirely.
-    heuristic = run_pipeline_no_llm(corpus, user_config=pii_cfg)
+    # language_profile, task). The LLM either overrides the judgment fields
+    # or we fall back to it entirely.
+    heuristic = run_pipeline_no_llm(corpus, user_config=pii_cfg, task=resolved_task)
     if not use_llm:
         return heuristic, notes
     try:
@@ -319,7 +344,7 @@ def recommend(req: RecommendRequest) -> RecommendResponse:
     config = _resolve_config(req.config, req.config_path)
     _validate_or_400(config)
     corpus = _load_text_for_request(req.corpus_paths, req.corpus_text)
-    rec, notes = _run_recommendation(corpus, config, req.use_llm)
+    rec, notes = _run_recommendation(corpus, config, req.use_llm, task=req.task)
     return RecommendResponse(
         recommendation=rec,
         config_used=config,
@@ -334,6 +359,9 @@ async def recommend_upload(
     files: List[UploadFile] = File(..., description="Corpus files to analyze."),
     config_file: Optional[UploadFile] = File(None, description="Optional user config JSON."),
     use_llm: bool = Form(False),
+    task: Optional[str] = Form(None,
+        description="Workload type. retrieval | classification | clustering | deduplication | similarity. "
+                    "Defaults to value in the (uploaded or bundled) config; falls back to 'retrieval'."),
 ) -> RecommendResponse:
     """Multipart variant — accept the corpus as one or more uploaded files
     and (optionally) a config JSON. Files are written to a tempdir and
@@ -368,7 +396,7 @@ async def recommend_upload(
             raise HTTPException(status_code=400, detail="No valid files uploaded.")
 
         corpus = load_corpus(saved_paths)
-        rec, run_notes = _run_recommendation(corpus, config, use_llm)
+        rec, run_notes = _run_recommendation(corpus, config, use_llm, task=task)
         return RecommendResponse(
             recommendation=rec,
             config_used=config,

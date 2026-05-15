@@ -529,6 +529,7 @@ def run_pipeline_no_llm(
     corpus: str,
     user_config: Optional[Dict[str, Any]] = None,
     tokenizer_name: str = "bert-base-uncased",
+    task: str = "retrieval",
 ) -> Dict[str, Any]:
     """Run the deterministic portion of the pipeline (no LLM, no agent
     reasoning) and produce a heuristic recommendation. Useful for tests,
@@ -536,13 +537,18 @@ def run_pipeline_no_llm(
 
     The output schema matches what the LLM agent returns, so callers can
     treat the two interchangeably.
+
+    `task` selects the workload pattern: "retrieval" (default), "classification",
+    "clustering", "deduplication", or "similarity". Task-specific scoring
+    promotes/demotes candidates and toggles whether prompt prefixes and a
+    cross-encoder reranker are surfaced.
     """
     reset_context(corpus, user_config, tokenizer_name)
     _tool_device_profiler()
     _tool_pii_remover()
     _tool_corpus_analyzer()
 
-    return synthesize_heuristic_recommendation(_CONTEXT)
+    return synthesize_heuristic_recommendation(_CONTEXT, task=task)
 
 
 # Embedding-model catalogue. Each entry carries the metadata the recommender
@@ -638,6 +644,44 @@ def _estimate_index(model: Dict[str, Any], doc_count: int, compute_device: str) 
     }
 
 
+SUPPORTED_TASKS = ("retrieval", "classification", "clustering", "deduplication", "similarity")
+ASYMMETRIC_TASKS = {"retrieval"}  # only retrieval has query/passage asymmetry
+RERANKER_TASKS = {"retrieval"}    # only retrieval benefits from a reranker stage
+
+
+def _task_score_adjustment(task: str, model: Dict[str, Any]) -> int:
+    """Per-task preference bumps. Returns a small score adjustment
+    (lower = better, matches the existing score() convention).
+
+    Heuristics:
+      retrieval     — neutral; defer to context-window-fit scoring
+      classification — prefer dim>=768 (denser separation in linear classifiers)
+      clustering    — prefer compact models (cheaper centroid math at scale)
+      deduplication — prefer smallest fast models (large index, batch indexing)
+      similarity    — prefer symmetric-paraphrase models (paraphrase-mpnet etc.)
+    """
+    name = model["name"].lower()
+    dim = int(model.get("dim", 768))
+    size_mb = int(model.get("size_mb", 500))
+
+    if task == "retrieval":
+        return 0
+    if task == "classification":
+        return -2 if dim >= 768 else 1
+    if task == "clustering":
+        return -2 if size_mb <= 600 else 2
+    if task == "deduplication":
+        # Tiny + fast wins. Sub-200MB strongly preferred.
+        if size_mb <= 200: return -3
+        if size_mb <= 600: return 0
+        return 3
+    if task == "similarity":
+        if "paraphrase" in name: return -3
+        if "mpnet" in name: return -1
+        return 0
+    return 0
+
+
 def _recommend_reranker(multilingual: bool, top_model_size_mb: int) -> Dict[str, Any]:
     """Embedding retrieval typically caps at ~70-75% recall@10. A small
     cross-encoder reranker on top of the top-K retrieved candidates pushes
@@ -664,10 +708,19 @@ def _recommend_reranker(multilingual: bool, top_model_size_mb: int) -> Dict[str,
     }
 
 
-def synthesize_heuristic_recommendation(ctx: AgentContext) -> Dict[str, Any]:
+def synthesize_heuristic_recommendation(ctx: AgentContext,
+                                        task: str = "retrieval") -> Dict[str, Any]:
     """Produce a structured recommendation from the gathered context using
     deterministic rules. The same schema the LLM agent emits, so downstream
-    consumers don't need to branch on which path produced it."""
+    consumers don't need to branch on which path produced it.
+
+    `task` controls how candidates are scored and whether prompt prefixes /
+    a reranker are surfaced. Defaults to "retrieval" (the most common case).
+    See SUPPORTED_TASKS for the full list."""
+    if task not in SUPPORTED_TASKS:
+        # Soft-fail: unknown task → fall back to retrieval scoring rather
+        # than refuse. Surface in notes so the user sees what happened.
+        task = "retrieval"
     specs = ctx.device_specs or {}
     analysis = ctx.corpus_analysis or {}
     pii = ctx.pii_report or {"summary": {}, "total": 0}
@@ -711,14 +764,20 @@ def synthesize_heuristic_recommendation(ctx: AgentContext) -> Dict[str, Any]:
     # dominated by a single outlier (which max would be).
     target_window = 512 if chunking_needed else max(p95_tokens, 256)
 
-    def score(c: Dict[str, Any]) -> Tuple[int, int]:
+    def score(c: Dict[str, Any]) -> Tuple[int, int, int]:
         window = c["ctx_window"]
+        # Primary: meets the corpus's context-window need.
+        # Secondary: task-aware preference bump (cheaper for clustering /
+        # dedup, denser for classification, paraphrase-tuned for similarity).
+        # Tertiary: distance from target window (smaller is better).
+        task_bonus = _task_score_adjustment(task, c)
         if window < target_window:
-            return (1, target_window - window)
-        return (0, window - target_window)
+            return (1, task_bonus, target_window - window)
+        return (0, task_bonus, window - target_window)
 
     ranked = sorted(candidates, key=score)[:3]
 
+    is_asymmetric = task in ASYMMETRIC_TASKS
     recommended_models = []
     for i, m in enumerate(ranked):
         rationale_parts = [
@@ -727,6 +786,12 @@ def synthesize_heuristic_recommendation(ctx: AgentContext) -> Dict[str, Any]:
             "Multilingual." if m.get("multilingual") else "English-only.",
             "Open-source / on-device — privacy-preserving.",
         ]
+        # Prefixes only matter for asymmetric tasks (retrieval). For
+        # symmetric tasks (clustering / dedup / similarity / classification),
+        # encoding both sides with the same string is the right call —
+        # surface empty strings to signal "no prefix needed."
+        embed_prefix = m.get("embed_prefix", "") if is_asymmetric else ""
+        query_prefix = m.get("query_prefix", "") if is_asymmetric else ""
         recommended_models.append({
             "name": m["name"],
             "rank": i + 1,
@@ -735,8 +800,8 @@ def synthesize_heuristic_recommendation(ctx: AgentContext) -> Dict[str, Any]:
             "context_window": m["ctx_window"],
             "size_mb": m["size_mb"],
             "multilingual": m.get("multilingual", False),
-            "embed_prefix": m.get("embed_prefix", ""),
-            "query_prefix": m.get("query_prefix", ""),
+            "embed_prefix": embed_prefix,
+            "query_prefix": query_prefix,
         })
 
     chunking_strategy = {
@@ -791,10 +856,27 @@ def synthesize_heuristic_recommendation(ctx: AgentContext) -> Dict[str, Any]:
     index_estimate = (
         _estimate_index(ranked[0], doc_count, compute_device) if ranked else {}
     )
-    reranker = _recommend_reranker(
-        multilingual=bool(ranked[0].get("multilingual")) if ranked else is_multilingual,
-        top_model_size_mb=ranked[0]["size_mb"] if ranked else 0,
-    )
+    # Reranker only makes sense for retrieval — clustering / dedup /
+    # similarity / classification don't have a "candidate list to rerank"
+    # stage. Surface a no-op explainer for those tasks instead of
+    # recommending a model that won't get used.
+    if task in RERANKER_TASKS:
+        reranker = _recommend_reranker(
+            multilingual=bool(ranked[0].get("multilingual")) if ranked else is_multilingual,
+            top_model_size_mb=ranked[0]["size_mb"] if ranked else 0,
+        )
+    else:
+        reranker = {
+            "name": None,
+            "size_mb": 0,
+            "why": (
+                f"No reranker needed for task='{task}'. Cross-encoder rerankers "
+                "are designed for the retrieval pattern (rerank top-K candidates "
+                "after vector search). For clustering / deduplication / similarity / "
+                "classification you operate directly on embeddings, so the "
+                "reranking stage doesn't apply."
+            ),
+        }
 
     # Reasoning explanation: incorporate the new signals (p95, language).
     lang_blurb = ""
@@ -810,6 +892,7 @@ def synthesize_heuristic_recommendation(ctx: AgentContext) -> Dict[str, Any]:
     return {
         "recommended_models": recommended_models,
         "reasoning_explanation": (
+            f"Task: {task}. "
             f"Detected {pii_count} PII redactions ({'privacy-sensitive' if privacy_sensitive else 'standard privacy'}). "
             f"Corpus: {doc_count} documents, p50={token_stats.get('p50', 0):.0f} / "
             f"p95={p95_tokens} / p99={p99_tokens} tokens. "
@@ -822,6 +905,7 @@ def synthesize_heuristic_recommendation(ctx: AgentContext) -> Dict[str, Any]:
         "index_estimate": index_estimate,
         "reranker_recommendation": reranker,
         "language_profile": lang,
+        "task": task,
     }
 
 

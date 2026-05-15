@@ -75,16 +75,32 @@
       </div>
 
       <!-- Options -->
-      <div class="flex items-center justify-between mt-5">
-        <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer">
-          <input id="use-llm" type="checkbox" class="rounded border-slate-300 text-blue-600 focus:ring-blue-500">
-          <span>Use local LLM agent (Ollama, ~30s)</span>
-          <span class="text-xs text-slate-400">— off = fast deterministic heuristic</span>
-        </label>
-        <button id="submit"
-                class="px-5 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition">
-          Recommend a model
-        </button>
+      <div class="flex flex-col gap-4 mt-5">
+        <!-- Task selector — drives task-aware scoring + prefix/reranker logic -->
+        <div class="flex items-center gap-3 flex-wrap">
+          <label for="task" class="text-sm text-slate-700 font-medium">Task:</label>
+          <select id="task"
+                  class="text-sm border border-slate-300 rounded-md py-1.5 px-3 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+            <option value="retrieval" selected>Retrieval — semantic search (query → docs)</option>
+            <option value="classification">Classification — train a head on top of embeddings</option>
+            <option value="clustering">Clustering — group similar docs (k-means / HDBSCAN)</option>
+            <option value="deduplication">Deduplication — find near-duplicate docs</option>
+            <option value="similarity">Similarity — symmetric pairwise comparison</option>
+          </select>
+          <span id="task-hint" class="text-xs text-slate-400 ml-1"></span>
+        </div>
+
+        <div class="flex items-center justify-between">
+          <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer">
+            <input id="use-llm" type="checkbox" class="rounded border-slate-300 text-blue-600 focus:ring-blue-500">
+            <span>Use local LLM agent (Ollama, ~30s)</span>
+            <span class="text-xs text-slate-400">— off = fast deterministic heuristic</span>
+          </label>
+          <button id="submit"
+                  class="px-5 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition">
+            Recommend a model
+          </button>
+        </div>
       </div>
     </section>
 
@@ -108,7 +124,10 @@
 
       <!-- Top recommendation -->
       <div class="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
-        <div class="text-xs text-slate-500 uppercase tracking-wide mb-1">🧭 Top recommendation</div>
+        <div class="flex items-center justify-between flex-wrap gap-2 mb-1">
+          <div class="text-xs text-slate-500 uppercase tracking-wide">🧭 Top recommendation</div>
+          <div class="text-xs text-slate-500">Task: <span id="task-pill" class="font-medium text-slate-700 px-2 py-0.5 bg-slate-100 rounded"></span></div>
+        </div>
         <div class="flex items-baseline justify-between flex-wrap gap-2">
           <h3 id="top-name" class="text-2xl font-mono font-semibold text-slate-900"></h3>
           <div id="top-badges" class="flex gap-2"></div>
@@ -252,6 +271,20 @@
 
     let lastResp = null;
 
+    // Per-task hint shown next to the dropdown
+    const TASK_HINTS = {
+      retrieval: 'asymmetric search — prompt prefixes + reranker recommended',
+      classification: 'symmetric — prefer high-dim dense models, no prefix',
+      clustering: 'symmetric — prefer compact models, no prefix or reranker',
+      deduplication: 'symmetric — prefer fastest small models, no prefix or reranker',
+      similarity: 'symmetric — prefer paraphrase-tuned models, no prefix or reranker',
+    };
+    const taskSelect = document.getElementById('task');
+    const taskHint = document.getElementById('task-hint');
+    function refreshTaskHint() { taskHint.textContent = TASK_HINTS[taskSelect.value] || ''; }
+    taskSelect.addEventListener('change', refreshTaskHint);
+    refreshTaskHint();
+
     submitBtn.addEventListener('click', async () => {
       errorBox.classList.add('hidden');
       results.classList.add('hidden');
@@ -260,6 +293,7 @@
 
       try {
         const useLlm = document.getElementById('use-llm').checked;
+        const task = taskSelect.value;
         let resp;
         if (filesInput.classList.contains('hidden')) {
           // Text path
@@ -268,13 +302,14 @@
           resp = await fetch('/recommend', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ corpus_text: text, use_llm: useLlm }),
+            body: JSON.stringify({ corpus_text: text, use_llm: useLlm, task: task }),
           });
         } else {
           if (fileInput.files.length === 0) throw new Error('Choose at least one file.');
           const fd = new FormData();
           for (const f of fileInput.files) fd.append('files', f);
           fd.append('use_llm', useLlm ? 'true' : 'false');
+          fd.append('task', task);
           resp = await fetch('/recommend/upload', { method: 'POST', body: fd });
         }
         const json = await resp.json();
@@ -316,6 +351,9 @@
       } else {
         notesBlock.classList.add('hidden');
       }
+
+      // Task pill
+      document.getElementById('task-pill').textContent = rec.task || taskSelect.value || 'retrieval';
 
       // Top
       document.getElementById('top-name').textContent = top.name || 'n/a';
@@ -362,9 +400,9 @@
       // HW
       document.getElementById('hw-text').textContent = rec.hardware_fit_analysis || '';
 
-      // Reranker
+      // Reranker (may be a no-op block for non-retrieval tasks)
       const rr = rec.reranker_recommendation || {};
-      document.getElementById('rerank-name').textContent = rr.name || 'none';
+      document.getElementById('rerank-name').textContent = rr.name || '— not applicable for this task';
       document.getElementById('rerank-size').textContent = rr.size_mb ? `~${rr.size_mb} MB` : '';
       document.getElementById('rerank-why').textContent = rr.why || '';
 

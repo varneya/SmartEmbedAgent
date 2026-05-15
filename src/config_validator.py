@@ -154,6 +154,35 @@ def extract_pii_config(config: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+# Map the legacy `target_use_case` enum onto the new `task` vocabulary so
+# old configs keep producing the same recommendation behavior. Values not
+# in this map fall through to "retrieval" (the safe default).
+_LEGACY_TASK_MAP = {
+    "semantic_search": "retrieval",
+    "retrieval":       "retrieval",
+    "classification":  "classification",
+    "clustering":      "clustering",
+    "reranking":       "retrieval",  # reranking happens AFTER retrieval; the embedder is still retrieval-shaped
+}
+
+
+def extract_model_preferences(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Pull the model-preference knobs into a flat dict the orchestrator
+    consumes. Honors the new `task` field, falling back to the legacy
+    `target_use_case` for back-compat with older configs."""
+    prefs = config.get("model_preferences", {}) or {}
+    task = prefs.get("task")
+    if not task:
+        legacy = prefs.get("target_use_case")
+        task = _LEGACY_TASK_MAP.get(legacy, "retrieval") if legacy else "retrieval"
+    return {
+        "task": task,
+        "max_model_size_gb": prefs.get("max_model_size_gb"),
+        "preferred_model_families": list(prefs.get("preferred_model_families", []) or []),
+        "prioritize_speed_over_accuracy": bool(prefs.get("prioritize_speed_over_accuracy", False)),
+    }
+
+
 def extract_agent_settings(config: Dict[str, Any]) -> Dict[str, Any]:
     """Pull agent runtime knobs into a flat dict consumed by main.py."""
     agent = config.get("agent_settings", {}) or {}

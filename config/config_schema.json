@@ -68,8 +68,13 @@
         },
         "target_use_case": {
           "type": "string",
-          "description": "Primary downstream task, used to pick task-tuned models when available.",
+          "description": "LEGACY. Prefer `task` (below). Kept for backward compatibility with older configs.",
           "enum": ["semantic_search", "classification", "clustering", "retrieval", "reranking"]
+        },
+        "task": {
+          "type": "string",
+          "description": "What the embeddings will be used for. Single most important question for picking a model. retrieval=asymmetric search (query→doc, prefixes apply, reranker recommended); classification=train a linear head on top, prefer high-dim dense; clustering=group similar docs, prefer compact; deduplication=find near-duplicates, prefer fastest; similarity=symmetric pairwise comparison, prefer paraphrase-tuned. If both `task` and `target_use_case` are set, `task` wins.",
+          "enum": ["retrieval", "classification", "clustering", "deduplication", "similarity"]
         }
       }
     },

@@ -25,7 +25,9 @@
     "max_model_size_gb": 2.0,
     "preferred_model_families": ["sentence-transformers", "BAAI"],
     "prioritize_speed_over_accuracy": false,
-    "target_use_case": "semantic_search"
+    "target_use_case": "semantic_search",
+    "_task_comment": "Single most important field for picking a model. Options: retrieval | classification | clustering | deduplication | similarity. Drives whether prompt prefixes apply, whether a reranker is recommended, and which models get bumped up in the candidate ranking.",
+    "task": "retrieval"
   },
 
   "hardware_constraints": {

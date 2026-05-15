@@ -200,6 +200,37 @@ response = agent.invoke({"input": "Analyze this corpus and recommend a model."})
 
 User configuration lives in a single JSON file with four top-level groups: `pii_settings`, `model_preferences`, `hardware_constraints`, and `agent_settings`. See [`docs/CONFIG_GUIDE.md`](docs/CONFIG_GUIDE.md) for full field documentation and [`config/sample_config.json`](config/sample_config.json) for a worked example.
 
+### Task selection (`model_preferences.task`)
+
+The single most important field for picking a model — it tells the recommender what the embeddings will actually be used for. **`retrieval` (default)** is asymmetric search; the others are symmetric and turn off the prefix and reranker logic that only makes sense for retrieval.
+
+```jsonc
+"model_preferences": {
+  "task": "retrieval"   // retrieval | classification | clustering | deduplication | similarity
+}
+```
+
+| Task | Symmetric? | Prefixes? | Reranker? | Bias |
+|---|---|---|---|---|
+| `retrieval` | no (asymmetric) | yes (BGE/Nomic/E5 prefixes surface) | yes (`bge-reranker-base` paired) | match context window to corpus p95 |
+| `classification` | yes | no | no | prefer dim≥768 (denser separation for linear heads) |
+| `clustering` | yes | no | no | prefer compact (cheaper centroid math at scale) |
+| `deduplication` | yes | no | no | prefer smallest fast models (large index, batch indexing) |
+| `similarity` | yes | no | no | prefer paraphrase-tuned (mpnet variants) |
+
+In the FastAPI UI, pick from the **Task** dropdown above the file uploader. Programmatically:
+
+```bash
+curl -X POST http://localhost:8000/recommend \
+  -H 'Content-Type: application/json' \
+  -d '{"corpus_text":"...", "task":"clustering", "use_llm":false}'
+
+curl -X POST http://localhost:8000/recommend/upload \
+  -F files=@notes.csv -F use_llm=false -F task=deduplication
+```
+
+Backward compat: the legacy `model_preferences.target_use_case` field still works and maps to the closest `task` value (e.g. `semantic_search` → `retrieval`).
+
 ### PII recognizer options
 
 Two `pii_settings` fields control PII detection:

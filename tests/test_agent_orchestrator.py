@@ -87,6 +87,46 @@ class TestPipelineSchema(unittest.TestCase):
         self.assertEqual(ranks, sorted(ranks))
 
 
+class TestTaskAwareScoring(unittest.TestCase):
+    """Adding `task=` should change the recommendation in known ways:
+       - the response carries the task back as a field
+       - prefixes get suppressed for symmetric tasks
+       - reranker is omitted for non-retrieval tasks"""
+
+    def test_default_task_is_retrieval(self):
+        out = run_pipeline_no_llm(SAMPLE_CORPUS_SHORT)
+        self.assertEqual(out.get("task"), "retrieval")
+
+    def test_explicit_retrieval_keeps_reranker(self):
+        out = run_pipeline_no_llm(SAMPLE_CORPUS_SHORT, task="retrieval")
+        self.assertEqual(out["task"], "retrieval")
+        self.assertIn("reranker_recommendation", out)
+        self.assertIsNotNone(out["reranker_recommendation"].get("name"))
+
+    def test_clustering_skips_reranker(self):
+        out = run_pipeline_no_llm(SAMPLE_CORPUS_SHORT, task="clustering")
+        self.assertEqual(out["task"], "clustering")
+        self.assertIsNone(out["reranker_recommendation"]["name"])
+        self.assertIn("clustering", out["reranker_recommendation"]["why"].lower())
+
+    def test_deduplication_skips_reranker_and_suppresses_prefixes(self):
+        out = run_pipeline_no_llm(SAMPLE_CORPUS_SHORT, task="deduplication")
+        self.assertIsNone(out["reranker_recommendation"]["name"])
+        # Symmetric tasks should NOT carry asymmetric prompt prefixes.
+        for m in out["recommended_models"]:
+            self.assertEqual(m["embed_prefix"], "", f"{m['name']} kept embed prefix on symmetric task")
+            self.assertEqual(m["query_prefix"], "", f"{m['name']} kept query prefix on symmetric task")
+
+    def test_similarity_task_propagates(self):
+        out = run_pipeline_no_llm(SAMPLE_CORPUS_SHORT, task="similarity")
+        self.assertEqual(out["task"], "similarity")
+        self.assertIn("similarity", out["reasoning_explanation"].lower())
+
+    def test_unknown_task_falls_back_to_retrieval(self):
+        out = run_pipeline_no_llm(SAMPLE_CORPUS_SHORT, task="not_a_real_task")
+        self.assertEqual(out["task"], "retrieval")
+
+
 class TestPipelineBehavior(unittest.TestCase):
     """Behavior tests: the pipeline should respond to the input shape in
     sensible ways."""
