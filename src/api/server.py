@@ -92,6 +92,65 @@ from src.agent_orchestrator import SUPPORTED_TASKS  # noqa: E402
 SAMPLE_CONFIG_PATH = PROJECT_ROOT / "config" / "sample_config.json"
 TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 
+
+# ---------------------------------------------------------------------------
+# Security: corpus path allowlist
+# ---------------------------------------------------------------------------
+# By default the server binds to 127.0.0.1, but if a user ever switches to
+# HOST=0.0.0.0 (or tunnels via cloudflared / ngrok / Tailscale), the
+# `corpus_paths` field on POST /recommend would otherwise let any caller
+# read any file the server-process user can read — including ~/.ssh, OpenClaw
+# session credentials, or arbitrary documents.
+#
+# The allowlist gates every corpus path through resolve()-then-prefix-check,
+# which defeats `..` traversal AND symlink-escape (resolve() follows symlinks
+# before we compare). Default roots cover the obvious "places people put
+# corpora": $HOME, /tmp, /Volumes (mounted external drives on macOS), and
+# the project's own data/ dir (so the bundled samples work out of the box).
+#
+# Override via env var: SMARTEMBED_ALLOWED_CORPUS_ROOTS=/path1:/path2:...
+import os as _os
+
+
+def _default_allowed_roots() -> List[Path]:
+    return [
+        Path.home().resolve(),
+        Path("/tmp").resolve(),
+        Path("/Volumes").resolve(),
+        (PROJECT_ROOT / "data").resolve(),
+    ]
+
+
+def _allowed_roots() -> List[Path]:
+    raw = _os.getenv("SMARTEMBED_ALLOWED_CORPUS_ROOTS")
+    if raw:
+        return [Path(p).expanduser().resolve() for p in raw.split(":") if p.strip()]
+    return _default_allowed_roots()
+
+
+def _enforce_corpus_path_allowlist(p: Path) -> None:
+    """Raise 403 if `p` is not under any allowed root. Resolves symlinks
+    before comparison to defeat symlink-escape attacks."""
+    try:
+        resolved = p.expanduser().resolve()
+    except (RuntimeError, OSError) as e:
+        raise HTTPException(status_code=400, detail=f"invalid corpus path: {p} ({e})")
+    for root in _allowed_roots():
+        try:
+            resolved.relative_to(root)
+            return  # path is under an allowed root
+        except ValueError:
+            continue
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            f"corpus path {p} (resolves to {resolved}) is not under any allowed root. "
+            f"Allowed roots: {[str(r) for r in _allowed_roots()]}. "
+            "Override with the SMARTEMBED_ALLOWED_CORPUS_ROOTS env var "
+            "(colon-separated, like PATH)."
+        ),
+    )
+
 app = FastAPI(
     title="SmartEmbedAgent",
     description=(
@@ -183,8 +242,14 @@ def _load_text_for_request(corpus_paths: Optional[List[str]],
     if not corpus_paths:
         raise HTTPException(status_code=400,
                             detail="Provide corpus_text, corpus_paths, or upload files.")
+    # Enforce allowlist BEFORE load_corpus touches the filesystem. Without
+    # this, a public-facing instance would let any caller read any file the
+    # server-process user can read.
+    paths = [Path(p) for p in corpus_paths]
+    for p in paths:
+        _enforce_corpus_path_allowlist(p)
     try:
-        return load_corpus([Path(p).expanduser() for p in corpus_paths])
+        return load_corpus(paths)
     except FileNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except ValueError as e:
@@ -378,8 +443,14 @@ async def recommend_upload(
         config = json.loads(SAMPLE_CONFIG_PATH.read_text(encoding="utf-8"))
     _validate_or_400(config)
 
+    # Cap aggregate upload size to defend against accidental (or malicious)
+    # disk-fill. Default 100 MB across all files in one request; override
+    # via SMARTEMBED_MAX_UPLOAD_MB.
+    max_upload_bytes = int(_os.getenv("SMARTEMBED_MAX_UPLOAD_MB", "100")) * 1024 * 1024
+
     tmpdir = Path(tempfile.mkdtemp(prefix="smartembed_api_"))
     saved_paths: List[Path] = []
+    bytes_written = 0
     try:
         for f in files:
             if not f.filename:
@@ -389,6 +460,15 @@ async def recommend_upload(
             target = tmpdir / safe_name
             with target.open("wb") as out:
                 while chunk := await f.read(1024 * 1024):
+                    bytes_written += len(chunk)
+                    if bytes_written > max_upload_bytes:
+                        # Abort writes immediately; cleanup runs in finally.
+                        raise HTTPException(
+                            status_code=413,
+                            detail=(f"Upload exceeded {max_upload_bytes // (1024*1024)} MB "
+                                    f"(SMARTEMBED_MAX_UPLOAD_MB). Aborted at "
+                                    f"{bytes_written // (1024*1024)} MB."),
+                        )
                     out.write(chunk)
             saved_paths.append(target)
 

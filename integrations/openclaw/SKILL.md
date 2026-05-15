@@ -32,7 +32,20 @@ INVOKE this skill when the user says any of:
 
 The user provides one or more paths. Each path may be a file (`.txt`, `.md`, `.csv`, `.json`) or a directory containing any mix of those file types. Multiple paths concatenate into a single corpus. If the user pastes raw text instead of a path, write it to `/tmp/se_corpus.txt` first (using the `write` tool) and pass that path.
 
-Call the **exec** tool with this exact command. It runs the recommender AND prints a chat-ready summary to stdout — so you do not need to read any output files afterwards. To pass multiple user-provided paths, list them space-separated (each quoted) in place of `"<USER_PATH>"`.
+### Security: validate the path BEFORE substituting
+
+Because this skill substitutes a user-provided string into a shell command, you MUST sanity-check `<USER_PATH>` before substitution:
+
+1. The path must contain ONLY: alphanumerics, `/`, `-`, `_`, `.`, `~`, and space.
+2. **Reject** (do NOT substitute, ask the user to clarify) if the path contains any of: `'`, `"`, backslash, `;`, `|`, `&`, `$`, backtick, newline, `(`, `)`, `{`, `}`, `<`, `>`, `*`, `?`, `!`. These are shell metacharacters and could be a command-injection attempt.
+3. Also reject paths longer than 1024 characters.
+4. The path is then substituted into a single-quoted shell argument below — single quotes prevent any further shell interpretation.
+
+If validation fails, reply to the user: "That path contains characters I can't safely pass to a shell command. Please rename or move the file to a path with only letters, numbers, `/`, `-`, `_`, `.`, and spaces." Do NOT proceed with exec.
+
+### Exec command
+
+Call the **exec** tool with this exact command. It runs the recommender AND prints a chat-ready summary to stdout — so you do not need to read any output files afterwards. To pass multiple user-provided paths, list them space-separated (each quoted with single quotes) in place of `'<USER_PATH>'`.
 
 ```bash
 cd "$SMARTEMBED_HOME" && \
@@ -40,7 +53,7 @@ PY="$SMARTEMBED_HOME/venv/bin/python3"; \
 [ -x "$PY" ] || PY="$HOME/miniforge3/bin/python3"; \
 [ -x "$PY" ] || PY="$(command -v python3)"; \
 "$PY" main.py \
-  --corpus_path "<USER_PATH>" \
+  --corpus_path '<USER_PATH>' \
   --config_path config/sample_config.json \
   --output_path /tmp/se_recommendation.json \
   --no_llm > /tmp/se_recommendation.stderr 2>&1 && \

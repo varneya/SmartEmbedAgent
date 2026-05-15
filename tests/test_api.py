@@ -184,6 +184,86 @@ class TestTaskOverride(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_API, "FastAPI extras not installed")
+class TestPathAllowlist(unittest.TestCase):
+    """`corpus_paths` must be under an allowed root. Defeats the
+    'public server can read /etc/passwd' class of issues."""
+
+    def setUp(self):
+        self.client = TestClient(app)
+
+    def test_path_outside_allowed_roots_returns_403(self):
+        # /etc/passwd is a classic 'reach for arbitrary file' target. Even
+        # if the file exists and is readable, the allowlist must reject.
+        r = self.client.post("/recommend", json={
+            "corpus_paths": ["/etc/passwd"],
+            "use_llm": False,
+        })
+        self.assertEqual(r.status_code, 403)
+        self.assertIn("not under any allowed root", r.json()["detail"].lower()
+                      if isinstance(r.json().get("detail"), str)
+                      else str(r.json()["detail"]).lower())
+
+    def test_traversal_attempt_resolved_then_rejected(self):
+        # /tmp/../etc/passwd resolves to /etc/passwd, which is rejected.
+        r = self.client.post("/recommend", json={
+            "corpus_paths": ["/tmp/../etc/passwd"],
+            "use_llm": False,
+        })
+        self.assertEqual(r.status_code, 403)
+
+    def test_path_inside_tmp_is_allowed(self):
+        # Write a small temp corpus under /tmp (an allowed root) and confirm
+        # the allowlist permits it through to load_corpus.
+        import tempfile
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", dir="/tmp", delete=False) as tf:
+            tf.write("Customer feedback. Email me at alice@example.com.\n")
+            path = tf.name
+        try:
+            r = self.client.post("/recommend", json={
+                "corpus_paths": [path],
+                "use_llm": False,
+            })
+            self.assertEqual(r.status_code, 200, r.text)
+        finally:
+            Path(path).unlink(missing_ok=True)
+
+
+@unittest.skipUnless(HAS_API, "FastAPI extras not installed")
+class TestUploadSizeCap(unittest.TestCase):
+    """Upload endpoint must reject files larger than the configured cap
+    so a single request can't fill the disk."""
+
+    def setUp(self):
+        self.client = TestClient(app)
+
+    def test_upload_within_limit_succeeds(self):
+        # 1 MB synthetic file — well under the 100 MB default cap.
+        payload = ("Customer feedback. " * 50_000).encode("utf-8")[:1024 * 1024]
+        files = [("files", ("notes.txt", payload, "text/plain"))]
+        r = self.client.post("/recommend/upload", files=files,
+                             data={"use_llm": "false"})
+        self.assertEqual(r.status_code, 200, r.text)
+
+    def test_upload_over_limit_returns_413(self):
+        # Set a tiny cap so we don't have to fabricate a 100MB file.
+        import os
+        prev = os.environ.get("SMARTEMBED_MAX_UPLOAD_MB")
+        os.environ["SMARTEMBED_MAX_UPLOAD_MB"] = "1"   # 1 MB cap
+        try:
+            payload = b"X" * (2 * 1024 * 1024 + 1)     # 2 MB + 1 byte
+            files = [("files", ("big.txt", payload, "text/plain"))]
+            r = self.client.post("/recommend/upload", files=files,
+                                 data={"use_llm": "false"})
+            self.assertEqual(r.status_code, 413, r.text)
+            self.assertIn("exceed", r.json()["detail"].lower())
+        finally:
+            if prev is None:
+                os.environ.pop("SMARTEMBED_MAX_UPLOAD_MB", None)
+            else:
+                os.environ["SMARTEMBED_MAX_UPLOAD_MB"] = prev
+
+
+@unittest.skipUnless(HAS_API, "FastAPI extras not installed")
 class TestMarkdownDemo(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)

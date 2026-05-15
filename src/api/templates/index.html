@@ -241,12 +241,18 @@
     const fileList = document.getElementById('file-list');
     const dropzone = document.getElementById('dropzone');
     function renderFileList(files) {
-      fileList.innerHTML = '';
+      fileList.replaceChildren();   // safer than innerHTML='' (no parse step)
       Array.from(files).forEach(f => {
         const row = document.createElement('div');
         row.className = 'flex items-center justify-between bg-slate-50 px-3 py-1.5 rounded';
-        row.innerHTML = `<span class="font-mono text-xs">${f.name}</span>
-                         <span class="text-xs text-slate-500">${(f.size/1024).toFixed(1)} KB</span>`;
+        // Safe DOM construction — never interpolate user-controlled `f.name` into innerHTML.
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'font-mono text-xs';
+        nameSpan.textContent = f.name;
+        const sizeSpan = document.createElement('span');
+        sizeSpan.className = 'text-xs text-slate-500';
+        sizeSpan.textContent = `${(f.size/1024).toFixed(1)} KB`;
+        row.append(nameSpan, sizeSpan);
         fileList.appendChild(row);
       });
     }
@@ -411,12 +417,19 @@
 
       // All models
       const all = document.getElementById('all-models');
-      all.innerHTML = '';
+      all.replaceChildren();
       (rec.recommended_models || []).forEach(m => {
         const li = document.createElement('li');
         li.className = 'border border-slate-200 rounded-lg p-3 text-sm';
-        li.innerHTML = `<span class="font-mono font-medium">${m.rank}. ${m.name}</span>
-                        <div class="text-xs text-slate-500 mt-1">${m.rationale || ''}</div>`;
+        // m.name and m.rationale CAN come from the LLM when use_llm=true.
+        // Use textContent so a malicious model can't inject markup.
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'font-mono font-medium';
+        nameSpan.textContent = `${m.rank}. ${m.name}`;
+        const rationaleDiv = document.createElement('div');
+        rationaleDiv.className = 'text-xs text-slate-500 mt-1';
+        rationaleDiv.textContent = m.rationale || '';
+        li.append(nameSpan, rationaleDiv);
         all.appendChild(li);
       });
 

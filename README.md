@@ -358,6 +358,28 @@ open http://localhost:8000/docs
 
 Env vars: `HOST` (default `127.0.0.1`), `PORT` (default `8000`), `RELOAD` (default `false`).
 
+### Security: localhost-only by default
+
+The HTTP service is **designed to run on `127.0.0.1` only**. There is no built-in authentication, and the API has surface area (file paths, file uploads, `exec` of the LLM agent) that should never face the public internet without an auth proxy in front.
+
+**Hardening that ships in the box** (no extra config needed):
+
+| Defense | What it blocks | Tunable |
+|---|---|---|
+| Default bind `127.0.0.1` | Any non-loopback caller | `HOST=...` (don't unless you know what you're doing) |
+| **Corpus path allowlist** | `POST /recommend` with `corpus_paths` outside `~`, `/tmp`, `/Volumes`, `data/` returns `403`. `..` traversal and symlink-escape both defeated by `Path.resolve()` before the prefix check. | `SMARTEMBED_ALLOWED_CORPUS_ROOTS=/path1:/path2` (colon-separated) |
+| **Upload size cap** | `POST /recommend/upload` aborts with `413` once the aggregate exceeds 100 MB | `SMARTEMBED_MAX_UPLOAD_MB=200` |
+| **Filename sanitization on uploads** | `..`-style escapes in upload filenames | (always on; uses `Path(name).name`) |
+| **Safe DOM construction in the UI** | XSS via LLM-generated text in the result panel | (always on; uses `textContent` rather than `innerHTML` for response data) |
+
+**If you ever want to expose the API externally**, do at least one of:
+
+1. Front it with a reverse proxy that adds OIDC / bearer-token auth (Caddy, nginx + oauth2-proxy, Cloudflare Access)
+2. Tunnel via something with auth built in (Tailscale + ACL)
+3. Add an API-key check directly in the FastAPI app (simple `Depends`-based middleware)
+
+We do **not** recommend running this without auth on a public IP — even with the path allowlist, the rest of the surface (LLM agent invocations, deterministic compute) is unbounded and DoS-friendly.
+
 ## Chat-app integration (WhatsApp / Telegram / Signal via OpenClaw)
 
 If you have [OpenClaw](https://openclaw.ai) installed, this repo ships a ready-to-use skill that lets you ask for recommendations from any chat app OpenClaw supports. The flow:
