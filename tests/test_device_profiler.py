@@ -40,6 +40,14 @@ REQUIRED_KEYS = {
 # unified_memory_gb) that only appear on M-series Macs.
 APPLE_SILICON_KEYS = {"apple_silicon", "chip_name", "unified_memory_gb"}
 
+# Runtime memory / load / disk signals — added for memory-aware decisions.
+# Always present (with safe defaults on non-macOS or when probes fail).
+RUNTIME_KEYS = {
+    "swap_used_gb", "swap_percentage_used", "memory_pressure",
+    "load_avg_1min", "ollama_loaded_models",
+    "free_disk_tmp_gb", "free_disk_hf_cache_gb",
+}
+
 
 class TestSpecShape(unittest.TestCase):
     """The dictionary shape is the public contract — assert it carefully."""
@@ -52,9 +60,11 @@ class TestSpecShape(unittest.TestCase):
 
     def test_has_all_required_keys(self):
         keys = set(self.specs.keys())
-        self.assertTrue(REQUIRED_KEYS.issubset(keys), f"missing: {REQUIRED_KEYS - keys}")
-        # Any extra keys must be the documented Apple Silicon optional set.
-        extra = keys - REQUIRED_KEYS
+        self.assertTrue(REQUIRED_KEYS.issubset(keys), f"missing core: {REQUIRED_KEYS - keys}")
+        # Runtime memory signals are always populated (with safe defaults).
+        self.assertTrue(RUNTIME_KEYS.issubset(keys), f"missing runtime: {RUNTIME_KEYS - keys}")
+        # Any extras beyond core+runtime must be Apple-Silicon-only.
+        extra = keys - REQUIRED_KEYS - RUNTIME_KEYS
         self.assertTrue(extra.issubset(APPLE_SILICON_KEYS), f"unexpected keys: {extra - APPLE_SILICON_KEYS}")
 
     def test_field_types(self):
@@ -193,6 +203,120 @@ class TestErrorHandling(unittest.TestCase):
 
             # If the helper happened to be wrapped, we'd still expect CPU fallback.
             self.assertEqual(specs["compute_device"], "cpu")
+
+
+class TestRuntimeMemoryProbes(unittest.TestCase):
+    """The runtime-memory probes (swap, memory_pressure, load_avg, ollama,
+    disk-free) must always return safe defaults — they're called on every
+    request so they can never raise."""
+
+    def test_swap_probe_shape(self):
+        from src.device_profiler import _probe_swap
+        out = _probe_swap()
+        self.assertIn("swap_used_gb", out)
+        self.assertIn("swap_total_gb", out)
+        self.assertIn("swap_percentage_used", out)
+        self.assertIsInstance(out["swap_used_gb"], float)
+
+    def test_load_avg_probe_returns_float(self):
+        from src.device_profiler import _probe_load_avg
+        self.assertIsInstance(_probe_load_avg(), float)
+
+    def test_memory_pressure_returns_known_value(self):
+        from src.device_profiler import _probe_memory_pressure
+        self.assertIn(_probe_memory_pressure(), {"normal", "warn", "critical", "unknown"})
+
+    def test_ollama_probe_returns_list_even_when_unreachable(self):
+        from src.device_profiler import _probe_ollama_loaded
+        # If ollama is up, list of dicts; if down, []. Either way, a list.
+        result = _probe_ollama_loaded()
+        self.assertIsInstance(result, list)
+        for m in result:
+            self.assertIn("name", m)
+            self.assertIn("size_gb", m)
+
+    def test_disk_free_probe(self):
+        from src.device_profiler import _probe_disk_free
+        # /tmp exists on every UNIX-like system; /this/is/not/a/path doesn't.
+        self.assertGreater(_probe_disk_free("/tmp"), 0.0)
+        self.assertEqual(_probe_disk_free("/definitely/does/not/exist/12345"), 0.0)
+
+    def test_get_hardware_specs_includes_runtime_signals(self):
+        specs = get_hardware_specs()
+        for required in (
+            "swap_used_gb", "swap_percentage_used", "memory_pressure",
+            "load_avg_1min", "ollama_loaded_models",
+            "free_disk_tmp_gb", "free_disk_hf_cache_gb",
+        ):
+            self.assertIn(required, specs, f"missing runtime signal {required}")
+
+
+class TestMemoryWarningDerivation(unittest.TestCase):
+    """The recommender derives user-facing warnings from the runtime signals.
+    Each warning is a sentence; we verify the trigger conditions fire as
+    documented in the methodology page §3."""
+
+    def _fake_specs(self, **overrides):
+        base = {
+            "total_ram_gb": 48.0,
+            "available_ram_gb": 25.0,
+            "ram_percentage_used": 48.0,
+            "gpu_available": True,
+            "gpu_name": "Apple M4 Max",
+            "gpu_memory_gb": 0.0,
+            "compute_device": "mps",
+            "apple_silicon": True,
+            "chip_name": "Apple M4 Max",
+            "unified_memory_gb": 48.0,
+            "swap_used_gb": 0.0,
+            "swap_percentage_used": 0.0,
+            "memory_pressure": "normal",
+            "load_avg_1min": 1.5,
+            "ollama_loaded_models": [],
+            "free_disk_tmp_gb": 200.0,
+            "free_disk_hf_cache_gb": 200.0,
+        }
+        base.update(overrides)
+        return base
+
+    def test_no_warnings_on_healthy_system(self):
+        from src.agent_orchestrator import _derive_memory_warnings
+        out = _derive_memory_warnings(self._fake_specs(), top_model_size_mb=130)
+        self.assertEqual(out, [])
+
+    def test_warns_when_model_takes_majority_of_available_ram(self):
+        from src.agent_orchestrator import _derive_memory_warnings
+        # Model is 4 GB but only 2 GB free.
+        out = _derive_memory_warnings(self._fake_specs(available_ram_gb=2.0), top_model_size_mb=4096)
+        self.assertTrue(any("only 2.0 GB is free" in w for w in out), out)
+
+    def test_warns_on_critical_macos_memory_pressure(self):
+        from src.agent_orchestrator import _derive_memory_warnings
+        out = _derive_memory_warnings(self._fake_specs(memory_pressure="critical"), top_model_size_mb=130)
+        self.assertTrue(any("CRITICAL" in w for w in out), out)
+
+    def test_warns_when_swap_in_use(self):
+        from src.agent_orchestrator import _derive_memory_warnings
+        out = _derive_memory_warnings(self._fake_specs(swap_used_gb=4.5), top_model_size_mb=130)
+        self.assertTrue(any("swap" in w.lower() for w in out), out)
+
+    def test_warns_when_ollama_has_loaded_models(self):
+        from src.agent_orchestrator import _derive_memory_warnings
+        out = _derive_memory_warnings(
+            self._fake_specs(ollama_loaded_models=[{"name": "qwen2.5:32b", "size_gb": 30.4}]),
+            top_model_size_mb=130,
+        )
+        self.assertTrue(any("Ollama" in w and "qwen2.5:32b" in w for w in out), out)
+
+    def test_warns_on_high_load_average(self):
+        from src.agent_orchestrator import _derive_memory_warnings
+        out = _derive_memory_warnings(self._fake_specs(load_avg_1min=15.0), top_model_size_mb=130)
+        self.assertTrue(any("load average" in w.lower() for w in out), out)
+
+    def test_warns_when_hf_cache_is_full(self):
+        from src.agent_orchestrator import _derive_memory_warnings
+        out = _derive_memory_warnings(self._fake_specs(free_disk_hf_cache_gb=2.0), top_model_size_mb=130)
+        self.assertTrue(any("Hugging Face cache" in w for w in out), out)
 
 
 if __name__ == "__main__":

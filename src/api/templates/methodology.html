@@ -114,6 +114,25 @@
       <p class="text-slate-700 mt-4 text-sm">
         For Apple Silicon, <code class="inline">gpu_memory_gb</code> is reported as 0.0 (the convention is <em>discrete</em> VRAM); use <code class="inline">unified_memory_gb</code> instead. The hardware filter treats MPS as GPU-equivalent for the purpose of unlocking larger models, gated on ≥16 GB unified memory.
       </p>
+
+      <h3 class="text-sm font-semibold mt-6 mb-2 text-slate-700">Runtime memory signals (current state, not just capacity)</h3>
+      <p class="text-slate-700 mb-3 text-sm">
+        The fields above describe <em>capacity</em> (what the box has). Total capacity drives the model recommendation so the same corpus + machine produces the same top-3 across runs (reproducibility). But a separate set of signals captures <em>current state</em> — these don't change which model is recommended; they generate the <code class="inline">memory_warnings</code> array shown in the amber panel below the result.
+      </p>
+      <table class="w-full">
+        <thead><tr><th>Signal</th><th>How it's computed</th><th>Triggers a warning when</th></tr></thead>
+        <tbody>
+          <tr><td><code class="inline">available_ram_gb</code></td><td><code class="inline">psutil.virtual_memory()</code></td><td>Top model size > 50% of available</td></tr>
+          <tr><td><code class="inline">swap_used_gb</code></td><td><code class="inline">psutil.swap_memory().used</code></td><td>>1.0 GB of swap is in use (already memory-pressured, even if "free RAM" looks healthy)</td></tr>
+          <tr><td><code class="inline">memory_pressure</code></td><td>macOS only — parses <code class="inline">memory_pressure -Q</code>; returns <code class="inline">"normal"</code> / <code class="inline">"warn"</code> / <code class="inline">"critical"</code> / <code class="inline">"unknown"</code></td><td>state is "warn" or "critical" — macOS's most reliable memory-stress signal (it lies about "free RAM" because of the unified file cache)</td></tr>
+          <tr><td><code class="inline">load_avg_1min</code></td><td><code class="inline">psutil.getloadavg()[0]</code></td><td>>8.0 — the throughput estimate assumes idle hardware</td></tr>
+          <tr><td><code class="inline">ollama_loaded_models</code></td><td>HTTP <code class="inline">GET /api/ps</code> against the local Ollama server</td><td>any LLM is loaded (typically 3–30 GB), competing with the embedder for the same RAM</td></tr>
+          <tr><td><code class="inline">free_disk_hf_cache_gb</code></td><td><code class="inline">shutil.disk_usage</code> on <code class="inline">~/.cache/huggingface</code> (or <code class="inline">$HOME</code> if no cache yet)</td><td>&lt;5 GB free — recommended model may fail to download</td></tr>
+        </tbody>
+      </table>
+      <p class="text-slate-700 mt-4 text-sm">
+        <strong>Why warnings, not filters:</strong> the recommendation should be <em>reproducible</em> — same corpus + machine should give the same top-3 today and tomorrow. If we let "I have Chrome open right now" downgrade the recommendation, the system would feel unpredictable and audit logs would be hard to interpret. So the model rank stays driven by total capacity, but the <em>operational</em> reality (current free memory, loaded LLMs, swap state) is surfaced loudly so the user can decide whether to act now or close some apps first.
+      </p>
     </section>
 
     <!-- 4. Candidate pool -->

@@ -41,7 +41,8 @@ from __future__ import annotations
 import json
 import platform
 import subprocess
-from typing import Any, Dict
+from pathlib import Path
+from typing import Any, Dict, List
 
 
 def _bytes_to_gb(b: int) -> float:
@@ -153,6 +154,108 @@ def _detect_apple_silicon_mps(total_ram_gb: float) -> Dict[str, Any]:
         return {}
 
 
+def _probe_swap() -> Dict[str, Any]:
+    """Current swap usage. If any swap is in use, the system is already
+    memory-pressured even if free RAM looks healthy."""
+    try:
+        import psutil
+        s = psutil.swap_memory()
+        return {
+            "swap_used_gb": _bytes_to_gb(s.used),
+            "swap_total_gb": _bytes_to_gb(s.total),
+            "swap_percentage_used": round(s.percent, 2) if s.total else 0.0,
+        }
+    except Exception as e:
+        print(f"[device_profiler] swap probe failed: {type(e).__name__}: {e}")
+        return {"swap_used_gb": 0.0, "swap_total_gb": 0.0, "swap_percentage_used": 0.0}
+
+
+def _probe_load_avg() -> float:
+    """1-minute system load average. Approximates 'how much else is the
+    machine doing right now'. High load = bad time for a heavy embedder."""
+    try:
+        import psutil
+        return round(psutil.getloadavg()[0], 2)
+    except (AttributeError, Exception) as e:
+        print(f"[device_profiler] load-average probe failed: {type(e).__name__}: {e}")
+        return 0.0
+
+
+def _probe_memory_pressure() -> str:
+    """macOS-specific. Reads `memory_pressure -Q` (quiet) which outputs the
+    system-wide free-memory percentage, and maps it to one of 'normal' /
+    'warn' / 'critical' / 'unknown'. Returns 'unknown' on non-macOS hosts.
+
+    Apple's official thresholds aren't documented as exact percentages, but
+    Console.app and the kernel pressure notifications reliably trip around:
+        free >= 25%  → normal
+        10% <= free < 25%  → warn
+        free < 10%   → critical
+    """
+    if platform.system() != "Darwin":
+        return "unknown"
+    try:
+        result = subprocess.run(
+            ["memory_pressure", "-Q"],
+            capture_output=True, text=True, timeout=2, check=False,
+        )
+        out = result.stdout + result.stderr
+        # Extract the percentage from "System-wide memory free percentage: NN%"
+        import re
+        m = re.search(r"free percentage:\s*(\d+)\s*%", out, re.IGNORECASE)
+        if m:
+            free_pct = int(m.group(1))
+            if free_pct < 10:
+                return "critical"
+            if free_pct < 25:
+                return "warn"
+            return "normal"
+        # Newer macOS variants sometimes print explicit labels — keep that as a fallback.
+        low = out.lower()
+        if "critical" in low: return "critical"
+        if "warn" in low:     return "warn"
+        if "normal" in low:   return "normal"
+        return "unknown"
+    except (subprocess.SubprocessError, FileNotFoundError, OSError):
+        return "unknown"
+
+
+def _probe_ollama_loaded() -> List[Dict[str, Any]]:
+    """Ask Ollama which models are currently loaded into memory. Returns
+    [] if Ollama isn't running or doesn't respond. The size_gb of loaded
+    models matters because they're competing with the embedder for the
+    same RAM budget."""
+    base = (
+        # Honor the same env var the rest of the codebase respects.
+        __import__("os").environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+    )
+    try:
+        import urllib.request
+        with urllib.request.urlopen(f"{base}/api/ps", timeout=1.5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        models = data.get("models") or []
+        return [
+            {
+                "name": m.get("name") or m.get("model") or "?",
+                "size_gb": _bytes_to_gb(int(m.get("size") or m.get("size_vram") or 0)),
+            }
+            for m in models
+        ]
+    except Exception:
+        # Ollama not running, network blocked, malformed response — all
+        # silently mean 'no live LLMs to worry about'.
+        return []
+
+
+def _probe_disk_free(path: str) -> float:
+    """Free disk in GB at the given mount, or 0.0 on any failure."""
+    try:
+        import shutil
+        return _bytes_to_gb(shutil.disk_usage(path).free)
+    except Exception:
+        return 0.0
+
+
 def get_hardware_specs() -> Dict[str, Any]:
     """Inspect the host and return hardware specs as a dictionary.
 
@@ -188,11 +291,32 @@ def get_hardware_specs() -> Dict[str, Any]:
             "compute_device": "cpu",
         }
 
+    # ----- Runtime memory pressure / competition signals -----
+    # These are the things the recommender uses to *warn* about current
+    # state. Decision-making (model rank) still uses total capacity so the
+    # recommendation stays reproducible; warnings are derived from these.
+    swap = _probe_swap()
+    runtime = {
+        "swap_used_gb": swap["swap_used_gb"],
+        "swap_percentage_used": swap["swap_percentage_used"],
+        "memory_pressure": _probe_memory_pressure(),     # macOS only; "unknown" elsewhere
+        "load_avg_1min": _probe_load_avg(),
+        "ollama_loaded_models": _probe_ollama_loaded(),  # competing memory consumers
+        "free_disk_tmp_gb": _probe_disk_free("/tmp"),
+    }
+    # HF cache lives under ~/.cache/huggingface by default; if that path
+    # doesn't exist yet (first install) fall back to $HOME.
+    hf_cache = Path.home() / ".cache" / "huggingface"
+    runtime["free_disk_hf_cache_gb"] = _probe_disk_free(
+        str(hf_cache) if hf_cache.exists() else str(Path.home())
+    )
+
     return {
         "total_ram_gb": total_ram_gb,
         "available_ram_gb": available_ram_gb,
         "ram_percentage_used": ram_percentage_used,
         **gpu_info,
+        **runtime,
     }
 
 

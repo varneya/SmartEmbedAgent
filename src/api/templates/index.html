@@ -126,6 +126,13 @@
         <ul id="notes-list" class="list-disc list-inside space-y-1"></ul>
       </div>
 
+      <!-- Memory / runtime warnings (current available RAM, swap, Ollama, etc.) -->
+      <div id="mem-warn-block" class="hidden bg-rose-50 border border-rose-200 rounded-xl p-4 text-sm text-rose-900">
+        <div class="font-medium mb-1">⚠️ Memory &amp; runtime warnings</div>
+        <p class="text-xs text-rose-700 mb-2">The recommendation above is based on your <em>total</em> hardware. These warnings reflect the machine's <em>current</em> state — they don't change which model is recommended, but they may change whether you should run it right now.</p>
+        <ul id="mem-warn-list" class="list-disc list-inside space-y-1"></ul>
+      </div>
+
       <!-- Top recommendation -->
       <div class="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
         <div class="flex items-center justify-between flex-wrap gap-2 mb-1">
@@ -350,7 +357,7 @@
       const notes = resp.notes || [];
       const notesBlock = document.getElementById('notes-block');
       const notesList = document.getElementById('notes-list');
-      notesList.innerHTML = '';
+      notesList.replaceChildren();
       if (notes.length) {
         notes.forEach(n => {
           const li = document.createElement('li');
@@ -360,6 +367,23 @@
         notesBlock.classList.remove('hidden');
       } else {
         notesBlock.classList.add('hidden');
+      }
+
+      // Memory / runtime warnings — separate panel so they don't get lost in
+      // the LLM-fallback notes.
+      const memWarnings = rec.memory_warnings || [];
+      const memBlock = document.getElementById('mem-warn-block');
+      const memList = document.getElementById('mem-warn-list');
+      memList.replaceChildren();
+      if (memWarnings.length) {
+        memWarnings.forEach(w => {
+          const li = document.createElement('li');
+          li.textContent = w;
+          memList.appendChild(li);
+        });
+        memBlock.classList.remove('hidden');
+      } else {
+        memBlock.classList.add('hidden');
       }
 
       // Task pill

@@ -682,6 +682,70 @@ def _task_score_adjustment(task: str, model: Dict[str, Any]) -> int:
     return 0
 
 
+def _derive_memory_warnings(specs: Dict[str, Any], top_model_size_mb: int) -> List[str]:
+    """Honest user-facing warnings about CURRENT system state. The model
+    recommendation itself is driven by total capacity (so it's reproducible
+    across runs); these warnings catch the cases where total capacity says
+    'fits' but right-now reality says 'will swap your machine to death.'
+
+    Each warning is one sentence, plain English, with a concrete suggestion."""
+    warnings: List[str] = []
+    available = float(specs.get("available_ram_gb") or 0.0)
+    swap_used = float(specs.get("swap_used_gb") or 0.0)
+    pressure = str(specs.get("memory_pressure") or "unknown")
+    load = float(specs.get("load_avg_1min") or 0.0)
+    ollama_models = specs.get("ollama_loaded_models") or []
+    top_gb = top_model_size_mb / 1024.0
+
+    # 1) Model would use a big chunk of CURRENT free memory.
+    if available > 0 and top_gb > 0.5 * available:
+        warnings.append(
+            f"Top recommendation needs ~{top_gb:.1f} GB but only {available:.1f} GB is free right now. "
+            "Embedding will likely push the system into swap. Close other apps or pick a smaller model."
+        )
+
+    # 2) macOS already paging.
+    if pressure == "critical":
+        warnings.append(
+            "macOS reports CRITICAL memory pressure — running an embedding job now will make it worse. "
+            "Free memory before proceeding."
+        )
+    elif pressure == "warn":
+        warnings.append(
+            "macOS reports elevated memory pressure. Embedding is feasible but expect swap activity."
+        )
+
+    # 3) Swap already in use (cross-platform signal).
+    if swap_used > 1.0:
+        warnings.append(
+            f"System is using {swap_used:.1f} GB of swap — already memory-pressured. Heavy embedding will worsen this."
+        )
+
+    # 4) Ollama is hogging memory the embedder also needs.
+    ollama_total = sum(float(m.get("size_gb") or 0) for m in ollama_models)
+    if ollama_total > 1.0:
+        names = ", ".join(m.get("name", "?") for m in ollama_models[:3])
+        warnings.append(
+            f"Ollama has {ollama_total:.1f} GB of models loaded ({names}). "
+            "Run `ollama stop <name>` before embedding heavy models if memory is tight."
+        )
+
+    # 5) High system load — embedder will be slower than the throughput estimate suggests.
+    if load > 8.0:
+        warnings.append(
+            f"1-min load average is {load:.1f} — the throughput estimate above assumes an idle machine; expect slower embedding."
+        )
+
+    # 6) Disk-free check for HF model download cache.
+    free_cache = float(specs.get("free_disk_hf_cache_gb") or 0.0)
+    if 0 < free_cache < 5.0:
+        warnings.append(
+            f"Only {free_cache:.1f} GB free in the Hugging Face cache directory. The recommended model may fail to download."
+        )
+
+    return warnings
+
+
 def _recommend_reranker(multilingual: bool, top_model_size_mb: int) -> Dict[str, Any]:
     """Embedding retrieval typically caps at ~70-75% recall@10. A small
     cross-encoder reranker on top of the top-K retrieved candidates pushes
@@ -844,12 +908,31 @@ def synthesize_heuristic_recommendation(ctx: AgentContext,
     else:
         accel_desc = "CPU-only. "
 
+    # Compose the hardware-fit string. Include CURRENT available memory so
+    # the user has both the capacity number AND the live operational number.
+    available_blurb = ""
+    avail = specs.get("available_ram_gb")
+    if avail is not None:
+        available_blurb = f"Currently {avail:.1f} GB free. "
+
     hardware_fit_analysis = (
-        f"Total RAM: {ram} GB. "
+        f"Total RAM: {ram} GB. {available_blurb}"
         + accel_desc
         + (f"Top recommendation '{ranked[0]['name']}' is {_format_size_mb(ranked[0]['size_mb'])} — fits comfortably."
            if ranked else "No candidate model passed the hardware/privacy filters.")
     )
+
+    # Derive operational warnings BEFORE returning so the caller can render
+    # them in the UI / chat reply without a second lookup.
+    memory_warnings = _derive_memory_warnings(
+        specs, ranked[0]["size_mb"] if ranked else 0
+    )
+    # When warnings exist, append the first one to hardware_fit_analysis so
+    # the most visible field surfaces the issue. The full list is also in
+    # the dedicated `memory_warnings` field for UIs that want to render
+    # them separately.
+    if memory_warnings:
+        hardware_fit_analysis += " ⚠ " + memory_warnings[0]
 
     # New: index + throughput estimate, reranker recommendation.
     doc_count = int(analysis.get("doc_count", 0))
@@ -905,6 +988,7 @@ def synthesize_heuristic_recommendation(ctx: AgentContext,
         "index_estimate": index_estimate,
         "reranker_recommendation": reranker,
         "language_profile": lang,
+        "memory_warnings": memory_warnings,
         "task": task,
     }
 
