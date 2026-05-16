@@ -172,6 +172,27 @@
 
 # target_window = 512 if chunking_needed else max(p95_tokens, 256)</code></pre>
       <p class="text-slate-700 mt-3 text-sm">Primary key: meets the corpus's p95 token need. Secondary: task-aware preference. Tertiary: closeness to the ideal context window (penalize over-fit slightly so we don't pick an 8K-context model for a 100-token corpus when a 256-context model would do).</p>
+
+      <h3 class="text-sm font-semibold mt-6 mb-2 text-slate-700">Dual recommendation: capacity vs current state</h3>
+      <p class="text-slate-700 mb-3 text-sm">
+        We produce <strong>two parallel ranked lists</strong> from the same scoring function but different memory budgets:
+      </p>
+      <table class="w-full">
+        <thead><tr><th>Field</th><th>Budget basis</th><th>Why</th></tr></thead>
+        <tbody>
+          <tr><td><code class="inline">recommended_models</code></td><td>Total capacity (e.g. 48 GB unified memory on M4 Max)</td><td>The canonical pick. Reproducible across runs — same machine, same recommendation regardless of current load. Use this for documentation, audit logs, "what should I use long-term?"</td></tr>
+          <tr><td><code class="inline">recommended_models_available</code></td><td><code class="inline">available_ram_gb × 0.5</code> (50% headroom for OS / file cache / inference activations)</td><td>The operational pick. Drops models too big to fit in current free memory. Use this for "what's safe to run RIGHT NOW given my current load?"</td></tr>
+        </tbody>
+      </table>
+      <p class="text-slate-700 mt-3 text-sm">
+        On a fresh machine with comfortable headroom, the two lists are usually identical (the UI shows a green "Identical to optimal — your machine has comfortable headroom right now ✓" hint). They diverge when the system is memory-pressured: a heavy LLM loaded in Ollama, lots of apps open, swap in use. In that case the right column shows a smaller model that won't push you into swap.
+      </p>
+      <p class="text-slate-700 mt-3 text-sm">
+        Why 50%? Because the model size is just the weights. Inference also needs activations + working memory + headroom for the OS file cache (which macOS aggressively uses). 50% is conservative; a sophisticated user might tighten the factor or override the budget via a future config field.
+      </p>
+      <p class="text-slate-700 mt-3 text-sm">
+        Auxiliary fields: <code class="inline">available_memory_budget_mb</code> (what budget was used) and <code class="inline">available_memory_basis_gb</code> (what free-RAM number that came from) are surfaced so any consumer can check the math.
+      </p>
     </section>
 
     <!-- 6. Task-aware -->

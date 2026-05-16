@@ -127,6 +127,52 @@ class TestTaskAwareScoring(unittest.TestCase):
         self.assertEqual(out["task"], "retrieval")
 
 
+class TestDualRecommendation(unittest.TestCase):
+    """Two parallel ranked lists: 'optimal for hardware' (uses total
+    capacity, reproducible) and 'safe for current memory' (uses
+    available_ram with 50% headroom, reflects current state)."""
+
+    def test_response_carries_both_lists(self):
+        out = run_pipeline_no_llm(SAMPLE_CORPUS_SHORT)
+        self.assertIn("recommended_models", out)
+        self.assertIn("recommended_models_available", out)
+        self.assertIn("available_memory_budget_mb", out)
+        self.assertIn("available_memory_basis_gb", out)
+
+    def test_available_list_is_subset_or_same_size(self):
+        # The available-memory list is always the same size as or smaller
+        # than the optimal list (it's a constrained version).
+        out = run_pipeline_no_llm(SAMPLE_CORPUS_SHORT)
+        self.assertLessEqual(len(out["recommended_models_available"]),
+                             len(out["recommended_models"]))
+
+    def test_available_list_entries_have_full_shape(self):
+        out = run_pipeline_no_llm(SAMPLE_CORPUS_SHORT)
+        for m in out["recommended_models_available"]:
+            for required in ("name", "rank", "rationale", "dimension",
+                             "context_window", "size_mb", "multilingual",
+                             "embed_prefix", "query_prefix"):
+                self.assertIn(required, m)
+
+    def test_budget_reflects_50pct_of_available(self):
+        # The budget should be ~half the basis (we use a 50% headroom factor).
+        out = run_pipeline_no_llm(SAMPLE_CORPUS_SHORT)
+        basis_gb = out["available_memory_basis_gb"]
+        budget_mb = out["available_memory_budget_mb"]
+        # Budget ≈ basis × 1024 × 0.5; allow 1 MB rounding slack.
+        expected = int(basis_gb * 1024 * 0.5)
+        self.assertEqual(budget_mb, expected,
+                         f"budget {budget_mb} MB doesn't match 50% of basis {basis_gb} GB")
+
+    def test_all_available_entries_fit_under_budget(self):
+        # Every model in the available list must satisfy size_mb <= budget.
+        out = run_pipeline_no_llm(SAMPLE_CORPUS_SHORT)
+        budget = out["available_memory_budget_mb"]
+        for m in out["recommended_models_available"]:
+            self.assertLessEqual(m["size_mb"], budget,
+                                 f"{m['name']} ({m['size_mb']} MB) exceeds budget {budget} MB")
+
+
 class TestPipelineBehavior(unittest.TestCase):
     """Behavior tests: the pipeline should respond to the input shape in
     sensible ways."""

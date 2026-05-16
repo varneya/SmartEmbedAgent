@@ -196,10 +196,26 @@
         <p id="ft-text" class="text-sm text-slate-700"></p>
       </div>
 
-      <!-- All ranked models -->
-      <div class="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
-        <div class="text-xs text-slate-500 uppercase tracking-wide mb-3">🥇 Full ranking</div>
-        <ol id="all-models" class="space-y-2"></ol>
+      <!-- Dual ranking: optimal-for-hardware vs safe-for-current-memory -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
+          <div class="flex items-center gap-2 mb-1">
+            <span class="text-xs text-slate-500 uppercase tracking-wide">🥇 Optimal for hardware</span>
+            <span class="text-xs text-slate-400">total capacity</span>
+          </div>
+          <p class="text-xs text-slate-500 mb-3">Reproducible — same machine, same recommendation regardless of current load.</p>
+          <ol id="all-models" class="space-y-2"></ol>
+        </div>
+        <div class="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
+          <div class="flex items-center gap-2 mb-1">
+            <span class="text-xs text-slate-500 uppercase tracking-wide">🛟 Safe for current memory</span>
+            <span id="avail-budget-pill" class="text-xs text-slate-400"></span>
+          </div>
+          <p class="text-xs text-slate-500 mb-3">Same scoring constrained to <code class="bg-slate-100 px-1 rounded">size_mb &le; 50% × available RAM</code>. Diverges from the left when the machine is memory-pressured.</p>
+          <ol id="all-models-available" class="space-y-2"></ol>
+          <p id="all-models-available-empty" class="hidden text-xs text-rose-600 italic">No candidate fits the current memory budget. Free memory before embedding, or pick a smaller corpus to test on.</p>
+          <p id="all-models-available-same" class="hidden text-xs text-emerald-600 italic mt-2">Identical to the optimal list above — your machine has comfortable headroom right now. ✓</p>
+        </div>
       </div>
 
       <!-- Downloads + raw JSON -->
@@ -443,23 +459,50 @@
       // Fine-tuning
       document.getElementById('ft-text').textContent = rec.fine_tuning_advice || '';
 
-      // All models
+      // Reusable: render a model list into a given <ol>. textContent only
+      // — never innerHTML — because m.name and m.rationale can come from
+      // an LLM when use_llm=true.
+      function renderModelList(olEl, models) {
+        olEl.replaceChildren();
+        models.forEach(m => {
+          const li = document.createElement('li');
+          li.className = 'border border-slate-200 rounded-lg p-3 text-sm';
+          const nameSpan = document.createElement('span');
+          nameSpan.className = 'font-mono font-medium';
+          nameSpan.textContent = `${m.rank}. ${m.name}`;
+          const rationaleDiv = document.createElement('div');
+          rationaleDiv.className = 'text-xs text-slate-500 mt-1';
+          rationaleDiv.textContent = m.rationale || '';
+          li.append(nameSpan, rationaleDiv);
+          olEl.appendChild(li);
+        });
+      }
+
+      // Optimal list (left column)
       const all = document.getElementById('all-models');
-      all.replaceChildren();
-      (rec.recommended_models || []).forEach(m => {
-        const li = document.createElement('li');
-        li.className = 'border border-slate-200 rounded-lg p-3 text-sm';
-        // m.name and m.rationale CAN come from the LLM when use_llm=true.
-        // Use textContent so a malicious model can't inject markup.
-        const nameSpan = document.createElement('span');
-        nameSpan.className = 'font-mono font-medium';
-        nameSpan.textContent = `${m.rank}. ${m.name}`;
-        const rationaleDiv = document.createElement('div');
-        rationaleDiv.className = 'text-xs text-slate-500 mt-1';
-        rationaleDiv.textContent = m.rationale || '';
-        li.append(nameSpan, rationaleDiv);
-        all.appendChild(li);
-      });
+      renderModelList(all, rec.recommended_models || []);
+
+      // Safe-for-current-memory list (right column)
+      const allAvail = document.getElementById('all-models-available');
+      const availList = rec.recommended_models_available || [];
+      renderModelList(allAvail, availList);
+
+      // Show the budget that was applied (e.g. "13312 MB / from 26.7 GB free")
+      const pill = document.getElementById('avail-budget-pill');
+      if (rec.available_memory_budget_mb && rec.available_memory_basis_gb) {
+        const budgetGB = (rec.available_memory_budget_mb / 1024).toFixed(1);
+        pill.textContent = `≤${budgetGB} GB · from ${rec.available_memory_basis_gb} GB free`;
+      } else {
+        pill.textContent = '';
+      }
+
+      // Empty / "same as optimal" hints
+      const emptyHint = document.getElementById('all-models-available-empty');
+      const sameHint = document.getElementById('all-models-available-same');
+      emptyHint.classList.toggle('hidden', availList.length > 0);
+      const optimalNames = (rec.recommended_models || []).map(m => m.name).join('|');
+      const availNames = availList.map(m => m.name).join('|');
+      sameHint.classList.toggle('hidden', !(availList.length > 0 && optimalNames === availNames));
 
       // Raw JSON
       document.getElementById('raw-json').textContent = JSON.stringify(rec, null, 2);

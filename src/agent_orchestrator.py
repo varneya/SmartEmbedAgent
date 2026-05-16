@@ -842,8 +842,8 @@ def synthesize_heuristic_recommendation(ctx: AgentContext,
     ranked = sorted(candidates, key=score)[:3]
 
     is_asymmetric = task in ASYMMETRIC_TASKS
-    recommended_models = []
-    for i, m in enumerate(ranked):
+
+    def _to_entry(m: Dict[str, Any], rank: int) -> Dict[str, Any]:
         rationale_parts = [
             f"Context window {m['ctx_window']}, dim {m['dim']}, {_format_size_mb(m['size_mb'])}.",
             "GPU-recommended." if m.get("requires_gpu_for_speed") else "CPU-friendly.",
@@ -856,9 +856,9 @@ def synthesize_heuristic_recommendation(ctx: AgentContext,
         # surface empty strings to signal "no prefix needed."
         embed_prefix = m.get("embed_prefix", "") if is_asymmetric else ""
         query_prefix = m.get("query_prefix", "") if is_asymmetric else ""
-        recommended_models.append({
+        return {
             "name": m["name"],
-            "rank": i + 1,
+            "rank": rank,
             "rationale": " ".join(rationale_parts),
             "dimension": m["dim"],
             "context_window": m["ctx_window"],
@@ -866,7 +866,31 @@ def synthesize_heuristic_recommendation(ctx: AgentContext,
             "multilingual": m.get("multilingual", False),
             "embed_prefix": embed_prefix,
             "query_prefix": query_prefix,
-        })
+        }
+
+    recommended_models = [_to_entry(m, i + 1) for i, m in enumerate(ranked)]
+
+    # ------------------------------------------------------------------
+    # Parallel recommendation: best model that fits in CURRENT available
+    # memory (with 50% headroom for OS / file cache / inference activations).
+    # The primary list above answers "what's optimal for my hardware in
+    # principle"; this answers "what's safe to run on my hardware right now."
+    # On a fresh machine with comfortable headroom, the two lists are
+    # usually identical. They diverge when the system is memory-pressured
+    # — heavy LLM loaded in Ollama, lots of apps open, swap in use, etc.
+    # ------------------------------------------------------------------
+    available_gb = float(specs.get("available_ram_gb")
+                         or specs.get("unified_memory_gb")
+                         or specs.get("total_ram_gb") or 0.0)
+    HEADROOM_FACTOR = 0.5  # leave 50% of available for OS + activations
+    available_budget_mb = int(available_gb * 1024 * HEADROOM_FACTOR)
+
+    available_candidates = [c for c in candidates if c.get("size_mb", 0) <= available_budget_mb]
+    if available_candidates:
+        ranked_for_available = sorted(available_candidates, key=score)[:3]
+        recommended_models_available = [_to_entry(m, i + 1) for i, m in enumerate(ranked_for_available)]
+    else:
+        recommended_models_available = []
 
     chunking_strategy = {
         "needed": chunking_needed,
@@ -990,6 +1014,14 @@ def synthesize_heuristic_recommendation(ctx: AgentContext,
         "language_profile": lang,
         "memory_warnings": memory_warnings,
         "task": task,
+        # Parallel recommendation under a tighter, current-memory budget.
+        # Same shape as `recommended_models` so UIs can render both lists
+        # with the same component. May be identical to recommended_models
+        # when the machine has comfortable headroom — the UI can dedupe
+        # if it cares.
+        "recommended_models_available": recommended_models_available,
+        "available_memory_budget_mb": available_budget_mb,
+        "available_memory_basis_gb": round(available_gb, 2),
     }
 
 
