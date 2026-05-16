@@ -404,6 +404,17 @@ def index(request: Request) -> Any:
     )
 
 
+@app.get("/methodology", response_class=HTMLResponse)
+def methodology(request: Request) -> Any:
+    """Static page explaining how the recommendation is computed end-to-end —
+    corpus profile, hardware profile, candidate pool, scoring, task-aware
+    bumps, the LLM agent overlay, privacy posture, and known limits."""
+    return templates.TemplateResponse(
+        "methodology.html",
+        {"request": request, "version": app.version},
+    )
+
+
 @app.post("/recommend", response_model=RecommendResponse)
 def recommend(req: RecommendRequest) -> RecommendResponse:
     config = _resolve_config(req.config, req.config_path)

@@ -1,0 +1,228 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Methodology · SmartEmbedAgent</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif; }
+    h2 { scroll-margin-top: 5rem; }
+    .step-num {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 1.75rem; height: 1.75rem;
+      background: rgb(37 99 235); color: white;
+      border-radius: 9999px; font-weight: 600; font-size: 0.875rem;
+      flex-shrink: 0;
+    }
+    table { font-size: 0.875rem; }
+    th { text-align: left; padding: 0.5rem 0.75rem; background: rgb(248 250 252); border-bottom: 1px solid rgb(226 232 240); font-weight: 600; }
+    td { padding: 0.5rem 0.75rem; border-bottom: 1px solid rgb(241 245 249); vertical-align: top; }
+    code.inline { background: rgb(241 245 249); padding: 0.125rem 0.375rem; border-radius: 0.25rem; font-size: 0.85em; }
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-800 antialiased">
+
+  <!-- Header -->
+  <header class="border-b border-slate-200 bg-white sticky top-0 z-10">
+    <div class="max-w-4xl mx-auto px-6 py-4 flex items-center justify-between">
+      <div>
+        <h1 class="text-lg font-semibold tracking-tight">📖 SmartEmbedAgent — Methodology</h1>
+        <p class="text-xs text-slate-500">How the recommendation is actually computed</p>
+      </div>
+      <div class="flex items-center gap-3">
+        <a href="/" class="text-sm text-slate-500 hover:text-slate-900">← Back to recommender</a>
+        <a href="https://github.com/varneya/SmartEmbedAgent" target="_blank"
+           class="text-sm text-slate-500 hover:text-slate-900">GitHub ↗</a>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-4xl mx-auto px-6 py-8">
+
+    <!-- TL;DR -->
+    <section class="bg-white rounded-xl border border-slate-200 p-6 shadow-sm">
+      <div class="text-xs uppercase tracking-wide text-slate-500 mb-2">TL;DR</div>
+      <p class="text-slate-700 leading-relaxed">
+        We profile your corpus (PII, language, token distribution), profile your machine (RAM, CPU/MPS/GPU), score a fixed pool of open-source embedding models against the resulting constraints, and surface the top 3 with concrete operational numbers (index size, throughput, suggested reranker, prompt prefixes). When you tick <em>Use local LLM agent</em>, a local Ollama model overlays its own judgment on the model-pick / rationale / chunking / fine-tuning fields; the deterministic numbers stay the same.
+      </p>
+    </section>
+
+    <!-- Table of contents -->
+    <nav class="bg-slate-100 rounded-lg p-4 mt-6 text-sm">
+      <strong class="text-slate-700">Sections</strong>
+      <ul class="grid grid-cols-2 gap-x-4 gap-y-1 mt-2 text-blue-700">
+        <li><a href="#overview" class="hover:underline">1. Overview</a></li>
+        <li><a href="#profile" class="hover:underline">2. Corpus profile</a></li>
+        <li><a href="#hardware" class="hover:underline">3. Hardware profile</a></li>
+        <li><a href="#candidates" class="hover:underline">4. Candidate model pool</a></li>
+        <li><a href="#filtering" class="hover:underline">5. Filtering &amp; scoring</a></li>
+        <li><a href="#task" class="hover:underline">6. Task-aware scoring</a></li>
+        <li><a href="#numbers" class="hover:underline">7. Concrete numbers</a></li>
+        <li><a href="#llm" class="hover:underline">8. LLM agent overlay</a></li>
+        <li><a href="#privacy" class="hover:underline">9. Privacy &amp; security</a></li>
+        <li><a href="#limits" class="hover:underline">10. Known limits</a></li>
+      </ul>
+    </nav>
+
+    <!-- 1. Overview -->
+    <section id="overview" class="bg-white rounded-xl border border-slate-200 p-6 shadow-sm mt-6">
+      <h2 class="text-xl font-semibold mb-4">1. Overview — the pipeline</h2>
+      <p class="text-slate-700 mb-4">
+        Every recommendation goes through a fixed five-step pipeline. Steps 1–3 are deterministic Python; steps 4–5 are math+lookup; step 6 (optional) is the local LLM agent overlay.
+      </p>
+      <ol class="space-y-3">
+        <li class="flex gap-3"><span class="step-num">1</span><div><strong>Profile the machine.</strong> Read RAM via <code class="inline">psutil</code>, detect CUDA / ROCm / Apple Silicon MPS via <code class="inline">torch</code>, surface unified-memory size on M-series Macs.</div></li>
+        <li class="flex gap-3"><span class="step-num">2</span><div><strong>Sanitize the corpus.</strong> Run regex + Hugging Face NER + opt-in regional packs (India: Aadhaar with Verhoeff validation, PAN, Indian mobile, vehicle registration) to redact PII <em>before</em> any analysis. Optional Microsoft Presidio backend for 50+ entity types.</div></li>
+        <li class="flex gap-3"><span class="step-num">3</span><div><strong>Analyze the cleaned corpus.</strong> Tokenize, compute p50 / p95 / p99 token-length distributions, detect language(s) via <code class="inline">langdetect</code> + script heuristics, calculate type-token ratio + domain-indicator terms.</div></li>
+        <li class="flex gap-3"><span class="step-num">4</span><div><strong>Filter the candidate pool.</strong> Drop models that don't fit the hardware (no GPU + needs-GPU-for-speed). Drop English-only models when the language profile is multilingual.</div></li>
+        <li class="flex gap-3"><span class="step-num">5</span><div><strong>Score &amp; rank.</strong> Primary: context window matches the corpus's p95. Secondary: task-aware preference bumps. Tertiary: distance from target window. Take top 3.</div></li>
+        <li class="flex gap-3"><span class="step-num">6</span><div><strong>Compute deterministic add-ons.</strong> Index size (dim × doc_count × 4 bytes), embed throughput (CPU vs MPS rates per model), reranker recommendation (English vs multilingual), per-model prompt-prefix templates.</div></li>
+      </ol>
+      <div class="mt-4 p-3 bg-blue-50 border border-blue-200 rounded text-sm">
+        <strong>Optional step 7 (LLM agent overlay):</strong> if you set <code class="inline">use_llm=true</code>, the LangChain agent loop runs the same tools above and synthesizes its own judgment fields (model pick, rationale, chunking_strategy, fine_tuning_advice, hardware_fit_analysis). We <em>merge</em> these on top of the deterministic baseline — so the index/throughput/reranker/language fields are always present and consistent regardless of whether the LLM was used.
+      </div>
+    </section>
+
+    <!-- 2. Corpus profile -->
+    <section id="profile" class="bg-white rounded-xl border border-slate-200 p-6 shadow-sm mt-6">
+      <h2 class="text-xl font-semibold mb-4">2. Corpus profile</h2>
+      <p class="text-slate-700 mb-4">Every recommendation starts here. The profile is computed once per request and drives every downstream decision.</p>
+      <table class="w-full">
+        <thead><tr><th>Signal</th><th>How it's computed</th><th>Why it matters</th></tr></thead>
+        <tbody>
+          <tr><td><code class="inline">doc_count</code></td><td>Split the corpus on blank lines (CSV cells joined with spaces, JSON list items kept whole)</td><td>Drives index-size estimate</td></tr>
+          <tr><td><code class="inline">token_stats</code> (p50 / p95 / p99 / max)</td><td>Tokenize each doc with <code class="inline">bert-base-uncased</code> by default; fallback to tiktoken or whitespace</td><td>The recommender uses <strong>p95</strong> as the target context window — drives the chunking decision and the model rank</td></tr>
+          <tr><td><code class="inline">language_profile</code></td><td><code class="inline">langdetect</code> on a sample of N=60 docs spread evenly across the corpus, plus a non-Latin script heuristic that catches Devanagari / Tamil / Bengali / CJK / Arabic even if langdetect isn't installed</td><td>Triggers the multilingual filter — drops English-only models when needed</td></tr>
+          <tr><td><code class="inline">vocabulary_metrics.type_token_ratio</code></td><td>Unique alphabetic tokens / total alphabetic tokens, lowercased</td><td>Low TTR + concentrated domain terms → fine-tuning is recommended</td></tr>
+          <tr><td><code class="inline">domain_indicators</code></td><td>Top-15 high-frequency non-stopword tokens of length ≥4</td><td>Surfaces the dominant terminology so users can sanity-check the corpus</td></tr>
+          <tr><td><code class="inline">pii_report</code></td><td>Regex pass + HF NER pass + region packs (e.g. India: Aadhaar/PAN/etc.) + custom redaction list. Aadhaar uses the <strong>Verhoeff checksum</strong> to filter false-positive 12-digit numbers.</td><td>Privacy posture; high PII count steers away from hosted APIs</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- 3. Hardware -->
+    <section id="hardware" class="bg-white rounded-xl border border-slate-200 p-6 shadow-sm mt-6">
+      <h2 class="text-xl font-semibold mb-4">3. Hardware profile</h2>
+      <p class="text-slate-700 mb-4">Detection runs in this order; first match wins:</p>
+      <ol class="list-decimal list-inside space-y-2 text-slate-700">
+        <li><strong>NVIDIA / CUDA</strong> — <code class="inline">torch.cuda.is_available()</code> + <code class="inline">torch.cuda.get_device_properties(0).total_memory</code></li>
+        <li><strong>AMD / ROCm</strong> — <code class="inline">torch.version.hip</code> set, then re-uses the CUDA-shaped API surface that PyTorch exposes against ROCm</li>
+        <li><strong>Apple Silicon / MPS</strong> — checks <code class="inline">torch.backends.mps.is_available()</code> on Darwin/arm64, parses chip name from <code class="inline">sysctl -n machdep.cpu.brand_string</code>, surfaces unified-memory size (= total RAM)</li>
+        <li><strong>CPU fallback</strong> — populated whenever none of the above succeed</li>
+      </ol>
+      <p class="text-slate-700 mt-4 text-sm">
+        For Apple Silicon, <code class="inline">gpu_memory_gb</code> is reported as 0.0 (the convention is <em>discrete</em> VRAM); use <code class="inline">unified_memory_gb</code> instead. The hardware filter treats MPS as GPU-equivalent for the purpose of unlocking larger models, gated on ≥16 GB unified memory.
+      </p>
+    </section>
+
+    <!-- 4. Candidate pool -->
+    <section id="candidates" class="bg-white rounded-xl border border-slate-200 p-6 shadow-sm mt-6">
+      <h2 class="text-xl font-semibold mb-4">4. Candidate model pool</h2>
+      <p class="text-slate-700 mb-4">Ten open-source embedding models, all runnable locally on Apple Silicon (or CUDA / ROCm). Each entry carries the metadata the scorer + downstream estimators need:</p>
+      <ul class="list-disc list-inside text-sm text-slate-700 space-y-1">
+        <li><code class="inline">dim</code> — embedding dimension; drives index-size estimate</li>
+        <li><code class="inline">ctx_window</code> — max input tokens</li>
+        <li><code class="inline">size_mb</code> — on-disk model size</li>
+        <li><code class="inline">multilingual</code> — true if trained for &gt;1 language</li>
+        <li><code class="inline">requires_gpu_for_speed</code> — true if CPU-only inference is impractical</li>
+        <li><code class="inline">embed_prefix</code> / <code class="inline">query_prefix</code> — exact strings to prepend at indexing / query time (<code class="inline">"search_document: "</code> for nomic, <code class="inline">"passage: "</code> / <code class="inline">"query: "</code> for E5, etc.). Surfacing these is critical: forgetting them costs 5–15% retrieval quality.</li>
+        <li><code class="inline">throughput_docs_per_sec</code> — rough CPU vs MPS rates per model, used in the embed-time estimate</li>
+      </ul>
+      <p class="text-slate-700 mt-3 text-sm">The pool deliberately tops out at ~2.3 GB so the recommender remains useful on lightweight hardware. On 48 GB Apple Silicon we'd ideally extend this to include Stella-1.5B / SFR-Embedding-Mistral / NV-Embed-v2 — see the README "Roadmap" for what's planned.</p>
+    </section>
+
+    <!-- 5. Filter + score -->
+    <section id="filtering" class="bg-white rounded-xl border border-slate-200 p-6 shadow-sm mt-6">
+      <h2 class="text-xl font-semibold mb-4">5. Filtering &amp; scoring</h2>
+      <table class="w-full">
+        <thead><tr><th>Filter</th><th>Triggered when</th><th>Effect</th></tr></thead>
+        <tbody>
+          <tr><td>Privacy</td><td>PII redactions ≥ 5</td><td>Drop hosted-API models from the pool (today the pool has none, but the code path is preserved)</td></tr>
+          <tr><td>Multilingual</td><td>language_profile.multilingual = true OR non-Latin script present</td><td>Drop English-only models</td></tr>
+          <tr><td>Hardware</td><td>No GPU/MPS, OR GPU memory &lt; 4 GB, OR (MPS &amp; RAM &lt; 16 GB)</td><td>Drop models marked requires_gpu_for_speed</td></tr>
+        </tbody>
+      </table>
+      <p class="text-slate-700 mt-4">After filtering, what remains is sorted by a 3-tuple score. Lower is better:</p>
+      <pre class="bg-slate-900 text-slate-100 text-xs rounded-lg p-4 overflow-x-auto mt-3"><code>def score(model):
+    window = model["ctx_window"]
+    task_bonus = _task_score_adjustment(task, model)  # see §6
+    if window &lt; target_window:
+        return (1, task_bonus, target_window - window)
+    return (0, task_bonus, window - target_window)
+
+# target_window = 512 if chunking_needed else max(p95_tokens, 256)</code></pre>
+      <p class="text-slate-700 mt-3 text-sm">Primary key: meets the corpus's p95 token need. Secondary: task-aware preference. Tertiary: closeness to the ideal context window (penalize over-fit slightly so we don't pick an 8K-context model for a 100-token corpus when a 256-context model would do).</p>
+    </section>
+
+    <!-- 6. Task-aware -->
+    <section id="task" class="bg-white rounded-xl border border-slate-200 p-6 shadow-sm mt-6">
+      <h2 class="text-xl font-semibold mb-4">6. Task-aware scoring</h2>
+      <p class="text-slate-700 mb-4">The task you pick on the home page changes which models get bumped, whether prompt prefixes apply, and whether a reranker is suggested:</p>
+      <table class="w-full">
+        <thead><tr><th>Task</th><th>Bias</th><th>Prefixes?</th><th>Reranker?</th></tr></thead>
+        <tbody>
+          <tr><td><code class="inline">retrieval</code> (default)</td><td>Neutral; defer to context-window-fit</td><td>Yes — surfaced verbatim</td><td>Yes — paired (bge-reranker-base / -v2-m3)</td></tr>
+          <tr><td><code class="inline">classification</code></td><td>Prefer dim ≥ 768 (denser separation for linear heads)</td><td>No — symmetric encoding</td><td>No</td></tr>
+          <tr><td><code class="inline">clustering</code></td><td>Prefer compact (cheaper centroid math)</td><td>No</td><td>No</td></tr>
+          <tr><td><code class="inline">deduplication</code></td><td>Strong bias toward smallest fast models (sub-200 MB gets a -3 score bonus)</td><td>No</td><td>No</td></tr>
+          <tr><td><code class="inline">similarity</code></td><td>Prefer paraphrase-tuned (paraphrase-mpnet variants)</td><td>No</td><td>No</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- 7. Numbers -->
+    <section id="numbers" class="bg-white rounded-xl border border-slate-200 p-6 shadow-sm mt-6">
+      <h2 class="text-xl font-semibold mb-4">7. Concrete numbers (index, throughput, reranker)</h2>
+      <p class="text-slate-700 mb-3"><strong>Index size estimate:</strong> <code class="inline">doc_count × dim × 4 bytes</code> (float32, one vector per doc). Reported in MB / GB. This tells you whether you need a vector DB at all, or whether you can keep the index in memory.</p>
+      <p class="text-slate-700 mb-3"><strong>Embed throughput:</strong> a per-model lookup table of CPU vs MPS rates (e.g. MiniLM ≈ 600 docs/sec on MPS, BGE-M3 ≈ 60 docs/sec on MPS). We pick the matching rate for the user's compute_device, then derive full-corpus embed time and per-query latency.</p>
+      <p class="text-slate-700 mb-3"><strong>Reranker pairing:</strong> embedding-only retrieval typically saturates at ~70–75% recall@10. Adding a cross-encoder reranker (BAAI/bge-reranker-base for English, BAAI/bge-reranker-v2-m3 for multilingual) over the top-K candidates lifts that to ~85–95%. We pair one when task=retrieval, omit it explicitly with a "not applicable for this task" message otherwise.</p>
+    </section>
+
+    <!-- 8. LLM overlay -->
+    <section id="llm" class="bg-white rounded-xl border border-slate-200 p-6 shadow-sm mt-6">
+      <h2 class="text-xl font-semibold mb-4">8. LLM agent overlay (when use_llm=true)</h2>
+      <p class="text-slate-700 mb-4">Optional. When you tick <em>Use local LLM agent</em>, the LangChain <code class="inline">create_tool_calling_agent</code> loop runs against your local Ollama model. It calls the same tools (device_profiler, pii_remover, corpus_analyzer) and emits its own JSON. We then:</p>
+      <ol class="list-decimal list-inside text-slate-700 space-y-2 text-sm">
+        <li>Always run the deterministic baseline first (so every shape-required field is populated)</li>
+        <li>Try strict JSON parse on the LLM output; if that fails, salvage with markdown-fence stripping and "first { through last }" extraction</li>
+        <li>Check that the LLM's JSON has the schema-required <code class="inline">recommended_models</code> key (small models often dump the last tool's output verbatim — we reject that as wrong-shape and surface a debug-friendly note)</li>
+        <li><strong>Merge</strong> the LLM's judgment fields onto the deterministic baseline. Only these are overridden: <code class="inline">recommended_models</code>, <code class="inline">reasoning_explanation</code>, <code class="inline">chunking_strategy</code>, <code class="inline">fine_tuning_advice</code>, <code class="inline">hardware_fit_analysis</code>. The deterministic <code class="inline">index_estimate</code> / <code class="inline">reranker_recommendation</code> / <code class="inline">language_profile</code> always survive.</li>
+      </ol>
+      <p class="text-slate-700 mt-3 text-sm">
+        We tested this with <code class="inline">hermes3:8b</code> (small Ollama model), <code class="inline">qwen3.5:9b</code>, and <code class="inline">qwen2.5:32b</code>. The 8B-class models are unreliable at producing valid JSON in the right schema; <code class="inline">qwen2.5:32b</code> is the smallest model we found that works consistently. Set the model via <code class="inline">SMARTEMBED_LLM_MODEL</code> env var.
+      </p>
+    </section>
+
+    <!-- 9. Privacy + security -->
+    <section id="privacy" class="bg-white rounded-xl border border-slate-200 p-6 shadow-sm mt-6">
+      <h2 class="text-xl font-semibold mb-4">9. Privacy &amp; security</h2>
+      <ul class="list-disc list-inside text-slate-700 space-y-2 text-sm">
+        <li><strong>Local-only by default.</strong> The recommender, the LLM (Ollama), and the embedder pool are all on-device. No API keys, no outbound calls except optional cached web search.</li>
+        <li><strong>Corpus content is never logged.</strong> Only the path + character count appear in stdout. PII redactor logs the entity <em>category</em> (EMAIL, AADHAAR, etc.) but never the value.</li>
+        <li><strong>FastAPI server binds to <code class="inline">127.0.0.1</code>.</strong> Path allowlist on <code class="inline">corpus_paths</code> defends against arbitrary file reads if the server is ever exposed. Upload endpoint capped at 100 MB. UI uses <code class="inline">textContent</code>+<code class="inline">createElement</code>, never <code class="inline">innerHTML</code>, for any LLM- or user-controlled string.</li>
+        <li><strong>OpenClaw skill validates user-provided paths</strong> before substituting into a shell command (single-quoted; reject shell metacharacters &amp; >1024 chars).</li>
+      </ul>
+      <p class="text-slate-700 mt-4 text-sm">See the README "Security: localhost-only by default" section for the full hardening table and instructions for safely exposing the API behind an auth proxy.</p>
+    </section>
+
+    <!-- 10. Limits -->
+    <section id="limits" class="bg-white rounded-xl border border-slate-200 p-6 shadow-sm mt-6">
+      <h2 class="text-xl font-semibold mb-4">10. Known limits &amp; honest caveats</h2>
+      <ul class="list-disc list-inside text-slate-700 space-y-2 text-sm">
+        <li><strong>The candidate pool is finite.</strong> Frontier models (Stella-1.5B, SFR-Embedding-Mistral, NV-Embed-v2, BGE-en-icl) aren't yet in the pool. On 48 GB Apple Silicon you could comfortably run a 7B-class embedder for noticeably better retrieval quality.</li>
+        <li><strong>Heuristic optimizes for "fits without waste", not "best quality given the hardware budget."</strong> If you have abundant memory, the recommender currently still picks small models. A planned <code class="inline">recommendation_priority</code> field ("speed" / "quality" / "balanced") would address this.</li>
+        <li><strong>Throughput numbers are estimates.</strong> Within ~2x of measured for typical hardware, but not benchmark-grade. Real numbers depend on batch size, sequence length distribution, and quantization.</li>
+        <li><strong>MTEB scores aren't surfaced today.</strong> The pool ranks models by hardware-fit + task-fit, not by published benchmark scores. A planned MTEB-aware mode would weight quality more heavily.</li>
+        <li><strong>No empirical bake-off (yet).</strong> The recommendation is a heuristic + LLM judgment, not a measured win on your data. A planned <code class="inline">--evaluate</code> flag would sample held-out docs, generate queries via the local LLM, and score recall@10 across the top-3 candidates.</li>
+        <li><strong>Domain-specific models aren't in the pool.</strong> No CodeBERT, no PubMedBERT, no SPECTER for scientific papers, no legal-BERT. A planned domain-detection step + domain-tuned model entries would address this.</li>
+      </ul>
+    </section>
+
+    <footer class="mt-10 mb-4 text-center text-xs text-slate-400">
+      Source: <a href="https://github.com/varneya/SmartEmbedAgent" target="_blank" class="hover:text-slate-700">github.com/varneya/SmartEmbedAgent</a> · <a href="/" class="hover:text-slate-700">← back to recommender</a>
+    </footer>
+  </main>
+
+</body>
+</html>
