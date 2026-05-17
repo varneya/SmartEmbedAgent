@@ -127,6 +127,81 @@ class TestTaskAwareScoring(unittest.TestCase):
         self.assertEqual(out["task"], "retrieval")
 
 
+class TestModelCanonicalization(unittest.TestCase):
+    """LLM agents paraphrase model names. The canonicalizer maps them
+    back to real Hugging Face identifiers so sentence-transformers can
+    actually load them."""
+
+    def test_exact_canonical_name_returned_as_is(self):
+        from src.agent_orchestrator import canonicalize_model_name
+        self.assertEqual(
+            canonicalize_model_name("BAAI/bge-large-en-v1.5"),
+            "BAAI/bge-large-en-v1.5",
+        )
+
+    def test_org_prefix_dropped_maps_to_canonical(self):
+        # The LLM-paraphrased name from the actual bug screenshot.
+        from src.agent_orchestrator import canonicalize_model_name
+        self.assertEqual(
+            canonicalize_model_name("BGE-large"),
+            "BAAI/bge-large-en-v1.5",
+        )
+
+    def test_mxbai_short_form_maps_correctly(self):
+        from src.agent_orchestrator import canonicalize_model_name
+        self.assertEqual(
+            canonicalize_model_name("mxbai-embed-large"),
+            "mixedbread-ai/mxbai-embed-large-v1",
+        )
+
+    def test_minilm_short_form_maps_correctly(self):
+        from src.agent_orchestrator import canonicalize_model_name
+        result = canonicalize_model_name("MiniLM-L6-v2")
+        self.assertEqual(result, "sentence-transformers/all-MiniLM-L6-v2")
+
+    def test_nomic_short_form_maps_correctly(self):
+        from src.agent_orchestrator import canonicalize_model_name
+        result = canonicalize_model_name("nomic-embed-text")
+        self.assertEqual(result, "nomic-ai/nomic-embed-text-v1.5")
+
+    def test_garbage_returns_none(self):
+        from src.agent_orchestrator import canonicalize_model_name
+        self.assertIsNone(canonicalize_model_name("totally-made-up-model"))
+        self.assertIsNone(canonicalize_model_name(""))
+        self.assertIsNone(canonicalize_model_name(None))
+
+
+class TestEnrichWithCatalog(unittest.TestCase):
+    """enrich_model_with_catalog produces a fully-shaped entry with
+    catalog metadata, regardless of what the LLM said about the model."""
+
+    def test_enriches_paraphrased_name_with_canonical_metadata(self):
+        from src.agent_orchestrator import enrich_model_with_catalog
+        enriched = enrich_model_with_catalog(
+            name="BGE-large", task="retrieval", rationale="LLM picked this", rank=1
+        )
+        self.assertEqual(enriched["name"], "BAAI/bge-large-en-v1.5")
+        # Catalog says dim 1024 for bge-large-en-v1.5.
+        self.assertEqual(enriched["dimension"], 1024)
+        # bge-large is asymmetric — should carry a query_prefix for retrieval task.
+        self.assertIn("Represent this sentence", enriched["query_prefix"])
+        # Rationale preserved.
+        self.assertEqual(enriched["rationale"], "LLM picked this")
+
+    def test_symmetric_task_suppresses_prefixes_even_for_asymmetric_models(self):
+        from src.agent_orchestrator import enrich_model_with_catalog
+        enriched = enrich_model_with_catalog(
+            name="BGE-large", task="clustering", rank=1
+        )
+        # Clustering is symmetric — prefixes should be empty.
+        self.assertEqual(enriched["embed_prefix"], "")
+        self.assertEqual(enriched["query_prefix"], "")
+
+    def test_unrecognizable_name_returns_none(self):
+        from src.agent_orchestrator import enrich_model_with_catalog
+        self.assertIsNone(enrich_model_with_catalog("not-a-real-embedder"))
+
+
 class TestDualRecommendation(unittest.TestCase):
     """Two parallel ranked lists: 'optimal for hardware' (uses total
     capacity, reproducible) and 'safe for current memory' (uses

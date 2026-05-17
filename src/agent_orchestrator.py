@@ -617,6 +617,82 @@ def _format_size_mb(mb: int) -> str:
     return f"{mb} MB" if mb < 1000 else f"~{mb / 1024:.1f} GB"
 
 
+def canonicalize_model_name(name: str, threshold: float = 0.6) -> Optional[str]:
+    """Map a (possibly LLM-paraphrased) model name back to its canonical
+    EMBEDDING_CATALOGUE identifier.
+
+    The LLM agents sometimes return names like "BGE-large" or
+    "mxbai-embed-large" instead of the full Hugging Face identifiers
+    ("BAAI/bge-large-en-v1.5", "mixedbread-ai/mxbai-embed-large-v1").
+    Downstream code (sentence-transformers, the evaluator) needs the
+    canonical names — they're what HF actually resolves.
+
+    Strategy:
+      1. Exact match — return as-is.
+      2. Substring match against the catalog's bare model names — strong
+         match (LLM dropped the org prefix or version suffix).
+      3. Fuzzy match via difflib.SequenceMatcher — fallback for typos /
+         abbreviations.
+
+    Returns None if no candidate scores above `threshold` (default 0.6).
+    """
+    from difflib import SequenceMatcher
+
+    if not name or not isinstance(name, str):
+        return None
+    name = name.strip()
+    catalog_names = [m["name"] for m in EMBEDDING_CATALOGUE]
+    if name in catalog_names:
+        return name
+
+    name_lc = name.lower()
+
+    def score(canonical: str) -> float:
+        c_lc = canonical.lower()
+        bare = c_lc.split("/")[-1]  # drop "BAAI/" / "sentence-transformers/" etc.
+        # Strong signal: LLM name is contained in the catalog name (or vice versa).
+        if name_lc in bare or bare.startswith(name_lc):
+            return 0.99
+        if bare in name_lc:
+            return 0.95
+        # Otherwise fuzzy match against the bare name (drops org prefix).
+        return SequenceMatcher(None, name_lc, bare).ratio()
+
+    scored = sorted(((score(c), c) for c in catalog_names), reverse=True)
+    if scored and scored[0][0] >= threshold:
+        return scored[0][1]
+    return None
+
+
+def enrich_model_with_catalog(name: str, task: str = "retrieval",
+                              rationale: Optional[str] = None,
+                              rank: int = 1) -> Optional[Dict[str, Any]]:
+    """Look up `name` in EMBEDDING_CATALOGUE and return a fully-shaped
+    recommended_models entry (with the right dim, ctx_window, size_mb,
+    prefixes for the task). Used by the merge step so LLM-returned models
+    always have correct metadata regardless of what the LLM said.
+
+    Returns None if the name can't be canonicalized."""
+    canonical = canonicalize_model_name(name)
+    if not canonical:
+        return None
+    entry = next((m for m in EMBEDDING_CATALOGUE if m["name"] == canonical), None)
+    if not entry:
+        return None
+    is_asymmetric = task in ASYMMETRIC_TASKS
+    return {
+        "name": canonical,
+        "rank": rank,
+        "rationale": rationale or "",
+        "dimension": entry["dim"],
+        "context_window": entry["ctx_window"],
+        "size_mb": entry["size_mb"],
+        "multilingual": entry.get("multilingual", False),
+        "embed_prefix": entry.get("embed_prefix", "") if is_asymmetric else "",
+        "query_prefix": entry.get("query_prefix", "") if is_asymmetric else "",
+    }
+
+
 def _estimate_index(model: Dict[str, Any], doc_count: int, compute_device: str) -> Dict[str, Any]:
     """Concrete numbers a data scientist can act on:
       - index size (bytes/MB at float32; assumes one vector per doc, no chunking)

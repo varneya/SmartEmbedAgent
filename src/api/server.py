@@ -86,7 +86,11 @@ from src.config_validator import (  # noqa: E402
     extract_pii_config,
     validate_config,
 )
-from src.agent_orchestrator import SUPPORTED_TASKS, build_llm  # noqa: E402
+from src.agent_orchestrator import (  # noqa: E402
+    SUPPORTED_TASKS,
+    build_llm,
+    enrich_model_with_catalog,
+)
 from src.evaluator import evaluate_candidates  # noqa: E402
 from src.agents import run_validated_recommendation  # noqa: E402
 
@@ -370,16 +374,67 @@ _LLM_OVERRIDABLE_FIELDS = {
 }
 
 
+def _canonicalize_llm_recommended_models(
+    llm_models: List[Dict[str, Any]],
+    heuristic_models: List[Dict[str, Any]],
+    task: str,
+) -> List[Dict[str, Any]]:
+    """LLM agents sometimes paraphrase model names ('BGE-large' instead
+    of 'BAAI/bge-large-en-v1.5'). Downstream code (sentence-transformers,
+    the evaluator) needs canonical Hugging Face identifiers — paraphrased
+    names produce 404s from the Hub.
+
+    For each LLM-named model:
+      1. Canonicalize the name via fuzzy match against EMBEDDING_CATALOGUE
+      2. Replace the metadata fields (dim, size_mb, prefixes) with the
+         canonical entry's values so they're correct regardless of what
+         the LLM hallucinated
+      3. KEEP the LLM's rationale (that's the judgment we wanted to overlay)
+
+    If no candidate in the LLM output can be canonicalized, fall back
+    entirely to the heuristic models so the response is still usable.
+    """
+    canonicalized: List[Dict[str, Any]] = []
+    for i, m in enumerate(llm_models or []):
+        if not isinstance(m, dict):
+            continue
+        original_name = m.get("name", "")
+        rationale = m.get("rationale", "")
+        enriched = enrich_model_with_catalog(
+            name=original_name, task=task, rationale=rationale, rank=i + 1
+        )
+        if enriched is None:
+            continue
+        if enriched["name"] != original_name:
+            # Record the original alias for debugging / UI surfacing.
+            enriched["_llm_alias"] = original_name
+        canonicalized.append(enriched)
+
+    return canonicalized if canonicalized else (heuristic_models or [])
+
+
 def _merge_llm_into_heuristic(heuristic: Dict[str, Any],
                               llm: Dict[str, Any]) -> Dict[str, Any]:
     """Start from the deterministic recommendation (which has every field,
     including the new data-scientist additions). Overlay only the LLM's
     judgment fields. Anything the LLM didn't emit keeps the heuristic
-    value, so the response is always shape-complete."""
+    value, so the response is always shape-complete.
+
+    LLM-returned model names go through canonicalization before being
+    surfaced so downstream consumers (the evaluator, sentence-transformers)
+    always see real Hugging Face identifiers, not LLM paraphrases.
+    """
     merged = dict(heuristic)
+    task = heuristic.get("task", "retrieval")
+    heuristic_models = heuristic.get("recommended_models", [])
     for key in _LLM_OVERRIDABLE_FIELDS:
         if key in llm and llm[key]:
-            merged[key] = llm[key]
+            if key == "recommended_models":
+                merged[key] = _canonicalize_llm_recommended_models(
+                    llm[key], heuristic_models, task
+                )
+            else:
+                merged[key] = llm[key]
     return merged
 
 

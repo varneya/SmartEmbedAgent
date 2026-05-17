@@ -327,19 +327,38 @@ def evaluate_candidates(
 
     # 2. Per-candidate evaluation
     results: List[EvalResult] = []
+    # Pre-canonicalize to catch obvious LLM paraphrases ('BGE-large' →
+    # 'BAAI/bge-large-en-v1.5'). Without this, sentence-transformers will
+    # try to fetch e.g. 'sentence-transformers/BGE-large' from HF and
+    # 404. This is belt-and-suspenders — the API merge step should have
+    # already canonicalized, but we re-check here so direct callers of
+    # evaluate_candidates() are also defended.
+    try:
+        from src.agent_orchestrator import canonicalize_model_name
+    except ImportError:
+        canonicalize_model_name = None  # type: ignore
+
     for cand in candidates:
         name = cand.get("name")
         if not name:
             continue
         embed_prefix = cand.get("embed_prefix", "") or ""
         query_prefix = cand.get("query_prefix", "") or ""
+        # Try to canonicalize a non-Hub-shaped name. Models in the
+        # catalogue always include a '/' org prefix; LLM paraphrases
+        # often don't.
+        if canonicalize_model_name and "/" not in name:
+            canonical = canonicalize_model_name(name)
+            if canonical:
+                logger.info("Canonicalized model name %r -> %r", name, canonical)
+                name = canonical
         t0 = time.time()
         try:
             doc_embs = _embed_texts(name, docs, prefix=embed_prefix)
             query_embs = _embed_texts(name, query_texts, prefix=query_prefix)
             metrics = _compute_metrics(query_embs, doc_embs, target_indices)
             results.append(EvalResult(
-                model=name,
+                model=name,  # canonical form, may differ from cand["name"]
                 mrr=metrics["mrr"],
                 ndcg_at_10=metrics["ndcg_at_10"],
                 recall_at_5=metrics["recall_at_5"],
