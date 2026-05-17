@@ -88,6 +88,7 @@ from src.config_validator import (  # noqa: E402
 )
 from src.agent_orchestrator import SUPPORTED_TASKS, build_llm  # noqa: E402
 from src.evaluator import evaluate_candidates  # noqa: E402
+from src.agents import run_validated_recommendation  # noqa: E402
 
 
 SAMPLE_CONFIG_PATH = PROJECT_ROOT / "config" / "sample_config.json"
@@ -231,6 +232,23 @@ class EvaluateRequest(BaseModel):
 
 class EvaluateResponse(BaseModel):
     report: Dict[str, Any]
+    notes: List[str] = Field(default_factory=list)
+
+
+class ValidatedRecommendRequest(BaseModel):
+    corpus_paths: Optional[List[str]] = Field(default=None)
+    corpus_text: Optional[str] = Field(default=None)
+    config: Optional[Dict[str, Any]] = Field(default=None)
+    config_path: Optional[str] = Field(default=None)
+    task: Optional[str] = Field(default=None)
+    use_llm: bool = Field(default=True,
+        description="If True, the Suggester / Decider / Reporter agents use the local Ollama LLM. "
+                    "If False, all agents fall back to deterministic logic (faster, no LLM dependency).")
+    n_queries: int = Field(default=30, ge=5, le=200)
+
+
+class ValidatedRecommendResponse(BaseModel):
+    context: Dict[str, Any]  # serialized AgentContext (recommendation, eval_report, decision, markdown_report, per_agent_notes)
     notes: List[str] = Field(default_factory=list)
 
 
@@ -564,6 +582,42 @@ def evaluate(req: EvaluateRequest) -> EvaluateResponse:
         heuristic_top_model=req.heuristic_top_model,
     )
     return EvaluateResponse(report=report.to_dict(), notes=notes)
+
+
+@app.post("/validated_recommend", response_model=ValidatedRecommendResponse)
+def validated_recommend(req: ValidatedRecommendRequest) -> ValidatedRecommendResponse:
+    """End-to-end validated pipeline: Suggester → QueryGenerator → Evaluator
+    → Decider → Reporter. Returns the full AgentContext (recommendation +
+    eval report + decision + markdown narrative + per-agent process trace).
+
+    Slow (~1-5 min on M4 Max for typical corpora with cached models;
+    longer on first-run model downloads). The Evaluator step dominates."""
+    notes: List[str] = []
+    config = _resolve_config(req.config, req.config_path)
+    _validate_or_400(config)
+    corpus = _load_text_for_request(req.corpus_paths, req.corpus_text)
+
+    resolved_task = _resolve_task(req.task, config, notes)
+
+    llm = None
+    if req.use_llm:
+        try:
+            llm = build_llm()
+        except Exception as e:
+            notes.append(
+                f"Couldn't initialise local LLM ({type(e).__name__}: {e}). "
+                "All agents will use deterministic fallback paths."
+            )
+
+    ctx = run_validated_recommendation(
+        corpus=corpus,
+        config=config,
+        task=resolved_task,
+        use_llm=req.use_llm,
+        llm=llm,
+        n_queries=req.n_queries,
+    )
+    return ValidatedRecommendResponse(context=ctx.to_dict(), notes=notes)
 
 
 @app.get("/recommend/markdown", response_class=PlainTextResponse)

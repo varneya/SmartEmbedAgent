@@ -354,6 +354,7 @@ open http://localhost:8000/docs
 | `/recommend/upload` | POST | Multipart files (+ optional config_file). Same response shape |
 | `/recommend/markdown` | GET | Convenience: runs the bundled sample corpus, returns Markdown |
 | `/evaluate` | POST | **Empirically rank candidates** on YOUR corpus — generates synthetic queries via the local LLM, embeds with each candidate, returns MRR / nDCG@10 / recall@k. Slow (~1–5 min). |
+| `/validated_recommend` | POST | **Full 5-agent pipeline** (Suggester → QueryGenerator → Evaluator → Decider → Reporter). Returns the final pick + decision reasoning + per-agent process trace + Markdown narrative report. Slow (~1–5 min). |
 | `/healthz` | GET | Liveness + reports whether Ollama is reachable |
 | `/docs` | GET | FastAPI's auto-generated OpenAPI / Swagger UI |
 

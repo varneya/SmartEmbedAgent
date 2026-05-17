@@ -61,6 +61,7 @@
         <li><a href="#numbers" class="hover:underline">7. Concrete numbers</a></li>
         <li><a href="#llm" class="hover:underline">8. LLM agent overlay</a></li>
         <li><a href="#evaluate" class="hover:underline">8b. Empirical validation</a></li>
+        <li><a href="#agents" class="hover:underline">8c. Multi-agent pipeline</a></li>
         <li><a href="#privacy" class="hover:underline">9. Privacy &amp; security</a></li>
         <li><a href="#limits" class="hover:underline">10. Known limits</a></li>
       </ul>
@@ -267,6 +268,37 @@
 
       <p class="text-slate-700 text-sm">
         Multi-agent extension (planned, PR 2): wrap this primitive in 5 agents — Suggester (existing), Query Generator, Evaluator, Decider (may pick a different winner than the suggester did), Reporter (synthesizes everything into a markdown report).
+      </p>
+    </section>
+
+    <!-- 8c. Multi-agent validated pipeline -->
+    <section id="agents" class="bg-white rounded-xl border border-slate-200 p-6 shadow-sm mt-6">
+      <h2 class="text-xl font-semibold mb-4">8c. Multi-agent validated pipeline</h2>
+      <p class="text-slate-700 mb-3">
+        The <code class="inline">/validated_recommend</code> endpoint sequences five specialized agents end-to-end. Each agent has one responsibility and a clear input → output contract, so you can reason about (and test) each in isolation.
+      </p>
+      <table class="w-full">
+        <thead><tr><th>Agent</th><th>Responsibility</th><th>Uses LLM?</th><th>Fallback when no LLM</th></tr></thead>
+        <tbody>
+          <tr><td>1. <strong>Suggester</strong></td><td>Heuristic top-3 candidates + their full metadata</td><td>Optional (overlay)</td><td>Pure deterministic — already worked for §1–7</td></tr>
+          <tr><td>2. <strong>QueryGenerator</strong></td><td>Sample N docs → produce (query, source_idx) pairs</td><td>Optional</td><td>Keyword extraction from each sampled doc</td></tr>
+          <tr><td>3. <strong>Evaluator</strong></td><td>Embed corpus + queries per candidate → MRR / nDCG / recall</td><td>No (uses sentence-transformers)</td><td>n/a — always deterministic</td></tr>
+          <tr><td>4. <strong>Decider</strong></td><td>Pick the final model; weigh effect size, footprint, fine-tuning need</td><td>Recommended</td><td>Deterministic decision tree: swap if empirical winner beats heuristic by ≥0.05 MRR; recommend fine-tuning if all candidates &lt; 0.25 MRR; else confirm heuristic</td></tr>
+          <tr><td>5. <strong>Reporter</strong></td><td>Synthesize everything into a Markdown narrative</td><td>Recommended</td><td>Structured template with the same content, less polished prose</td></tr>
+        </tbody>
+      </table>
+
+      <h3 class="text-sm font-semibold mt-6 mb-2 text-slate-700">Why this architecture</h3>
+      <ul class="list-disc list-inside text-sm text-slate-700 space-y-1">
+        <li><strong>Separation of concerns.</strong> The Evaluator never picks a winner; the Decider never embeds anything. Each agent is small enough to fit in your head.</li>
+        <li><strong>Testability.</strong> Each agent has its own test file. The orchestrator's tests use mocked embedders so CI doesn't pay model-load cost.</li>
+        <li><strong>Graceful degradation.</strong> Every agent is wrapped in a try/except at the orchestrator level. A single agent's crash (LLM down, sentence-transformers OOM, network blip) gets surfaced as a process-trace note; the downstream agents adapt rather than the whole pipeline collapsing.</li>
+        <li><strong>LLM is optional.</strong> Both the Decider and Reporter have deterministic fallbacks. You can run the whole pipeline with <code class="inline">use_llm=false</code> and still get a valid (less narrative) recommendation.</li>
+        <li><strong>Process transparency.</strong> Every agent adds a one-line note to <code class="inline">per_agent_notes</code>. The UI exposes these in a collapsible "process trace" so users can see exactly what each step did.</li>
+      </ul>
+
+      <p class="text-slate-700 mt-4 text-sm">
+        <strong>Speed:</strong> 1–5 minutes on M4 Max with cached models. The Evaluator step dominates. The other four agents combined are sub-second.
       </p>
     </section>
 

@@ -267,6 +267,55 @@
         </div>
       </div>
 
+      <!-- Validated workflow (5-agent pipeline, slowest path, definitive answer) -->
+      <div class="bg-white rounded-xl border-2 border-purple-200 p-5 shadow-sm">
+        <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
+          <div>
+            <div class="text-xs text-slate-500 uppercase tracking-wide">🤖 Full validated workflow (5 agents)</div>
+            <div class="text-sm text-slate-700">Suggester → QueryGenerator → Evaluator → Decider → Reporter. Produces a single authoritative recommendation backed by empirical evidence + LLM-synthesized narrative.</div>
+          </div>
+          <button id="run-validated"
+                  class="px-4 py-2 bg-purple-600 text-white text-sm font-medium rounded-lg hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition whitespace-nowrap">
+            Run validated workflow (~1–5 min)
+          </button>
+        </div>
+        <div id="validated-progress" class="hidden mt-3 text-sm text-purple-700">
+          <span class="inline-block animate-spin h-4 w-4 border-2 border-purple-300 border-t-purple-600 rounded-full align-middle"></span>
+          <span class="ml-2 align-middle">Running 5-agent pipeline… (Evaluator step is slow — real embeddings)</span>
+        </div>
+        <div id="validated-error" class="hidden mt-3 bg-rose-50 border border-rose-200 rounded p-3 text-sm text-rose-800"></div>
+        <div id="validated-results" class="hidden mt-4">
+          <!-- Final pick big card -->
+          <div class="bg-emerald-50 border border-emerald-200 rounded-lg p-4 mb-4">
+            <div class="text-xs text-slate-500 uppercase tracking-wide mb-1">Final pick</div>
+            <h4 id="validated-final-name" class="text-xl font-mono font-semibold text-slate-900"></h4>
+            <div class="flex items-center gap-2 mt-2 flex-wrap">
+              <span id="validated-basis" class="text-xs px-2 py-0.5 bg-emerald-200 text-emerald-900 rounded font-medium"></span>
+              <span id="validated-confidence" class="text-xs px-2 py-0.5 bg-slate-200 text-slate-800 rounded font-medium"></span>
+              <span id="validated-agrees" class="text-xs italic text-slate-500"></span>
+            </div>
+            <p id="validated-reasoning" class="text-sm text-slate-700 mt-3 leading-relaxed"></p>
+          </div>
+          <!-- Process trace -->
+          <details class="mt-3 text-sm">
+            <summary class="cursor-pointer text-slate-600 hover:text-slate-900">Process trace (what each agent did)</summary>
+            <ul id="validated-trace" class="list-disc list-inside space-y-1 mt-2 text-xs text-slate-600"></ul>
+          </details>
+          <!-- Markdown report -->
+          <details class="mt-3 text-sm" open>
+            <summary class="cursor-pointer text-slate-600 hover:text-slate-900">Full report (Markdown)</summary>
+            <pre id="validated-report" class="bg-slate-50 border border-slate-200 rounded p-3 text-xs whitespace-pre-wrap mt-2"></pre>
+          </details>
+          <!-- Download -->
+          <div class="mt-3">
+            <button id="validated-download"
+                    class="text-sm px-4 py-2 bg-purple-900 text-white rounded-lg hover:bg-purple-700 transition">
+              Download validated report (Markdown)
+            </button>
+          </div>
+        </div>
+      </div>
+
       <!-- Downloads + raw JSON -->
       <div class="flex flex-wrap items-center gap-3">
         <button id="download-md"
@@ -701,6 +750,91 @@
 
       document.getElementById('eval-results').classList.remove('hidden');
     }
+
+    // ---------------------------------------------------------------
+    // Validated workflow (5-agent pipeline)
+    // ---------------------------------------------------------------
+    let lastValidatedReport = null;
+
+    document.getElementById('run-validated').addEventListener('click', async () => {
+      const inText = !filesInput.classList.contains('hidden')
+        ? null
+        : document.getElementById('text-area').value.trim();
+      const prog = document.getElementById('validated-progress');
+      const err = document.getElementById('validated-error');
+      const res = document.getElementById('validated-results');
+      const btn = document.getElementById('run-validated');
+
+      err.classList.add('hidden');
+      res.classList.add('hidden');
+
+      let body;
+      if (inText) {
+        body = { corpus_text: inText };
+      } else {
+        err.textContent = "Validated workflow needs the corpus text on the server side. " +
+          "Switch to the 'Paste text' tab and paste your corpus, then click 'Recommend' again, " +
+          "then click 'Run validated workflow' here.";
+        err.classList.remove('hidden');
+        return;
+      }
+      body.task = taskSelect.value;
+      body.use_llm = document.getElementById('use-llm').checked;
+      body.n_queries = parseInt(document.getElementById('eval-nqueries').value, 10) || 30;
+
+      prog.classList.remove('hidden');
+      btn.disabled = true;
+      try {
+        const resp = await fetch('/validated_recommend', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const json = await resp.json();
+        if (!resp.ok) throw new Error(json.detail ? JSON.stringify(json.detail) : `HTTP ${resp.status}`);
+        renderValidated(json);
+      } catch (e) {
+        err.textContent = `Validated workflow failed: ${e.message}`;
+        err.classList.remove('hidden');
+      } finally {
+        prog.classList.add('hidden');
+        btn.disabled = false;
+      }
+    });
+
+    function renderValidated(resp) {
+      const ctx = resp.context || {};
+      lastValidatedReport = ctx.markdown_report || '';
+      const d = ctx.decision || {};
+      document.getElementById('validated-final-name').textContent = d.final_pick || '—';
+      document.getElementById('validated-basis').textContent = `basis: ${d.decision_basis || '?'}`;
+      document.getElementById('validated-confidence').textContent = `confidence: ${d.confidence || '?'}`;
+      document.getElementById('validated-agrees').textContent = d.agrees_with_heuristic
+        ? '(agrees with heuristic top ✓)'
+        : '(differs from heuristic top — swap recommended)';
+      document.getElementById('validated-reasoning').textContent = d.reasoning || '';
+
+      const trace = document.getElementById('validated-trace');
+      trace.replaceChildren();
+      (ctx.per_agent_notes || []).forEach(n => {
+        const li = document.createElement('li');
+        li.textContent = n;
+        trace.appendChild(li);
+      });
+      [...(resp.notes || [])].forEach(n => {
+        const li = document.createElement('li');
+        li.className = 'text-amber-700';
+        li.textContent = `[orchestrator-meta] ${n}`;
+        trace.appendChild(li);
+      });
+
+      document.getElementById('validated-report').textContent = ctx.markdown_report || '(no report)';
+      document.getElementById('validated-results').classList.remove('hidden');
+    }
+
+    document.getElementById('validated-download').addEventListener('click', () => {
+      if (lastValidatedReport) download('validated_recommendation.md', lastValidatedReport, 'text/markdown');
+    });
 
     // Toggle / downloads
     document.getElementById('toggle-json').addEventListener('click', () => {
