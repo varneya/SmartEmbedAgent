@@ -401,6 +401,11 @@
     const results = document.getElementById('results');
 
     let lastResp = null;
+    // Cache the corpus mode + last-submitted inputs so the eval / validated
+    // buttons can re-submit them without forcing the user to switch tabs.
+    let lastSubmittedMode = null;    // 'text' | 'files'
+    let lastSubmittedFiles = null;   // FileList from the last upload-mode submit
+    let lastSubmittedText = null;    // string from the last text-mode submit
 
     // Per-task hint shown next to the dropdown
     const TASK_HINTS = {
@@ -430,6 +435,9 @@
           // Text path
           const text = document.getElementById('text-area').value.trim();
           if (!text) throw new Error('Paste some text first.');
+          lastSubmittedMode = 'text';
+          lastSubmittedText = text;
+          lastSubmittedFiles = null;
           resp = await fetch('/recommend', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -437,6 +445,9 @@
           });
         } else {
           if (fileInput.files.length === 0) throw new Error('Choose at least one file.');
+          lastSubmittedMode = 'files';
+          lastSubmittedFiles = fileInput.files;
+          lastSubmittedText = null;
           const fd = new FormData();
           for (const f of fileInput.files) fd.append('files', f);
           fd.append('use_llm', useLlm ? 'true' : 'false');
@@ -616,16 +627,6 @@
       const candidates = rec.recommended_models || [];
       if (candidates.length === 0) return;
 
-      // Re-derive whether we're in text-paste or files mode to know which
-      // corpus to send. /evaluate accepts corpus_text OR corpus_paths.
-      // For text mode we already have the text in the textarea; for files
-      // we don't have local paths (uploads were ephemeral) — fall back to
-      // re-running everything as corpus_text by reading the originally-
-      // submitted text. If only files were used we have to ask the user
-      // to paste-or-reupload. (Pragmatic for v1.)
-      const inText = !filesInput.classList.contains('hidden')
-        ? null
-        : document.getElementById('text-area').value.trim();
       const evalProg = document.getElementById('eval-progress');
       const evalErr = document.getElementById('eval-error');
       const evalRes = document.getElementById('eval-results');
@@ -634,33 +635,43 @@
       evalErr.classList.add('hidden');
       evalRes.classList.add('hidden');
 
-      let body;
-      if (inText) {
-        body = { corpus_text: inText };
-      } else {
-        // Files mode — we don't have a server-readable path. Ask the user
-        // to paste their corpus into the text tab to evaluate.
-        evalErr.textContent = "Empirical eval needs the corpus text. " +
-          "Switch to the 'Paste text' tab and paste your corpus, then click 'Recommend' again, " +
-          "then click 'Run evaluation' here. (File-upload eval support coming in a later patch.)";
-        evalErr.classList.remove('hidden');
-        return;
-      }
-      body.candidates = candidates.map(m => ({
+      // Pull shared options.
+      const nQueries = parseInt(document.getElementById('eval-nqueries').value, 10) || 30;
+      const useLlmForQueries = document.getElementById('eval-use-llm').checked;
+      const candidatesPayload = candidates.map(m => ({
         name: m.name, embed_prefix: m.embed_prefix || '', query_prefix: m.query_prefix || ''
       }));
-      body.n_queries = parseInt(document.getElementById('eval-nqueries').value, 10) || 30;
-      body.use_llm_for_queries = document.getElementById('eval-use-llm').checked;
-      body.heuristic_top_model = candidates[0].name;
 
       evalProg.classList.remove('hidden');
       evalBtn.disabled = true;
       try {
-        const resp = await fetch('/evaluate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
+        let resp;
+        if (lastSubmittedMode === 'files' && lastSubmittedFiles && lastSubmittedFiles.length > 0) {
+          // Files mode → multipart /evaluate/upload (re-uses the same File objects
+          // the user already picked for /recommend/upload).
+          const fd = new FormData();
+          for (const f of lastSubmittedFiles) fd.append('files', f);
+          fd.append('candidates_json', JSON.stringify(candidatesPayload));
+          fd.append('n_queries', String(nQueries));
+          fd.append('use_llm_for_queries', useLlmForQueries ? 'true' : 'false');
+          fd.append('heuristic_top_model', candidates[0].name);
+          resp = await fetch('/evaluate/upload', { method: 'POST', body: fd });
+        } else {
+          // Text mode → JSON /evaluate.
+          const text = lastSubmittedText || document.getElementById('text-area').value.trim();
+          if (!text) throw new Error('No corpus available. Run "Recommend" first.');
+          resp = await fetch('/evaluate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              corpus_text: text,
+              candidates: candidatesPayload,
+              n_queries: nQueries,
+              use_llm_for_queries: useLlmForQueries,
+              heuristic_top_model: candidates[0].name,
+            }),
+          });
+        }
         const json = await resp.json();
         if (!resp.ok) throw new Error(json.detail ? JSON.stringify(json.detail) : `HTTP ${resp.status}`);
         renderEval(json);
@@ -757,9 +768,6 @@
     let lastValidatedReport = null;
 
     document.getElementById('run-validated').addEventListener('click', async () => {
-      const inText = !filesInput.classList.contains('hidden')
-        ? null
-        : document.getElementById('text-area').value.trim();
       const prog = document.getElementById('validated-progress');
       const err = document.getElementById('validated-error');
       const res = document.getElementById('validated-results');
@@ -768,28 +776,32 @@
       err.classList.add('hidden');
       res.classList.add('hidden');
 
-      let body;
-      if (inText) {
-        body = { corpus_text: inText };
-      } else {
-        err.textContent = "Validated workflow needs the corpus text on the server side. " +
-          "Switch to the 'Paste text' tab and paste your corpus, then click 'Recommend' again, " +
-          "then click 'Run validated workflow' here.";
-        err.classList.remove('hidden');
-        return;
-      }
-      body.task = taskSelect.value;
-      body.use_llm = document.getElementById('use-llm').checked;
-      body.n_queries = parseInt(document.getElementById('eval-nqueries').value, 10) || 30;
+      const task = taskSelect.value;
+      const useLlm = document.getElementById('use-llm').checked;
+      const nQueries = parseInt(document.getElementById('eval-nqueries').value, 10) || 30;
 
       prog.classList.remove('hidden');
       btn.disabled = true;
       try {
-        const resp = await fetch('/validated_recommend', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
+        let resp;
+        if (lastSubmittedMode === 'files' && lastSubmittedFiles && lastSubmittedFiles.length > 0) {
+          // Files mode → multipart /validated_recommend/upload.
+          const fd = new FormData();
+          for (const f of lastSubmittedFiles) fd.append('files', f);
+          fd.append('task', task);
+          fd.append('use_llm', useLlm ? 'true' : 'false');
+          fd.append('n_queries', String(nQueries));
+          resp = await fetch('/validated_recommend/upload', { method: 'POST', body: fd });
+        } else {
+          // Text mode → JSON /validated_recommend.
+          const text = lastSubmittedText || document.getElementById('text-area').value.trim();
+          if (!text) throw new Error('No corpus available. Run "Recommend" first.');
+          resp = await fetch('/validated_recommend', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ corpus_text: text, task, use_llm: useLlm, n_queries: nQueries }),
+          });
+        }
         const json = await resp.json();
         if (!resp.ok) throw new Error(json.detail ? JSON.stringify(json.detail) : `HTTP ${resp.status}`);
         renderValidated(json);

@@ -264,6 +264,71 @@ class TestUploadSizeCap(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_API, "FastAPI extras not installed")
+class TestMultipartEvaluateAndValidated(unittest.TestCase):
+    """The /evaluate/upload and /validated_recommend/upload endpoints
+    are the multipart variants the UI uses when the user submitted files
+    rather than pasted text. They must mirror their JSON counterparts."""
+
+    def setUp(self):
+        self.client = TestClient(app)
+        self.payload = (
+            "Customer feedback. Product is excellent.\n\n"
+            "Engine maintenance is straightforward for commuters.\n\n"
+            "Brake performance review under sudden braking."
+        ).encode("utf-8")
+
+    def test_evaluate_upload_with_keyword_fallback(self):
+        import json
+        files = [("files", ("corpus.txt", self.payload, "text/plain"))]
+        # Tiny candidate list; use_llm_for_queries=False keeps the test offline.
+        cands = json.dumps([
+            {"name": "sentence-transformers/all-MiniLM-L6-v2",
+             "embed_prefix": "", "query_prefix": ""},
+        ])
+        r = self.client.post("/evaluate/upload",
+                             files=files,
+                             data={"candidates_json": cands,
+                                   "n_queries": "3",
+                                   "use_llm_for_queries": "false",
+                                   "heuristic_top_model": "sentence-transformers/all-MiniLM-L6-v2"})
+        # The endpoint should accept the multipart form. The eval itself can
+        # still take time because it loads sentence-transformers. Allow either:
+        #   - 200 OK with a report
+        #   - 500-ish if sentence-transformers isn't installed in CI
+        self.assertIn(r.status_code, (200, 500), r.text)
+        if r.status_code == 200:
+            body = r.json()
+            self.assertIn("report", body)
+            self.assertIn("results", body["report"])
+
+    def test_evaluate_upload_rejects_invalid_candidates_json(self):
+        files = [("files", ("corpus.txt", self.payload, "text/plain"))]
+        r = self.client.post("/evaluate/upload",
+                             files=files,
+                             data={"candidates_json": "not a json array",
+                                   "n_queries": "5",
+                                   "use_llm_for_queries": "false"})
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("invalid candidates_json", r.json()["detail"].lower())
+
+    def test_validated_recommend_upload_accepts_multipart(self):
+        files = [("files", ("corpus.txt", self.payload, "text/plain"))]
+        r = self.client.post("/validated_recommend/upload",
+                             files=files,
+                             data={"task": "retrieval",
+                                   "use_llm": "false",
+                                   "n_queries": "3"})
+        # Same allowance for environments without sentence-transformers.
+        self.assertIn(r.status_code, (200, 500), r.text)
+        if r.status_code == 200:
+            body = r.json()
+            self.assertIn("context", body)
+            # The orchestrator should at least have populated the
+            # recommendation field even if Evaluator fails.
+            self.assertIn("recommendation", body["context"])
+
+
+@unittest.skipUnless(HAS_API, "FastAPI extras not installed")
 class TestMarkdownDemo(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)

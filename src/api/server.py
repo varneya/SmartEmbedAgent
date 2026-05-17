@@ -130,6 +130,63 @@ def _allowed_roots() -> List[Path]:
     return _default_allowed_roots()
 
 
+async def _save_uploads_and_load_corpus(
+    files: List[UploadFile],
+    max_upload_bytes: Optional[int] = None,
+) -> Tuple[str, int, Path]:
+    """Shared upload handler used by every multipart endpoint
+    (/recommend/upload, /evaluate/upload, /validated_recommend/upload).
+
+    Streams each upload to a tempdir, enforces an aggregate size cap,
+    and runs load_corpus over the saved files. Returns (corpus_text,
+    n_files_saved, tmpdir_path) — the caller is responsible for
+    cleaning up tmpdir in its own finally block (the corpus string is
+    already extracted so the files on disk aren't needed after this).
+    """
+    if max_upload_bytes is None:
+        max_upload_bytes = int(_os.getenv("SMARTEMBED_MAX_UPLOAD_MB", "100")) * 1024 * 1024
+
+    tmpdir = Path(tempfile.mkdtemp(prefix="smartembed_api_"))
+    saved_paths: List[Path] = []
+    bytes_written = 0
+    for f in files:
+        if not f.filename:
+            continue
+        # Strip path components to avoid `..`-style escapes; keep extension.
+        safe_name = Path(f.filename).name
+        target = tmpdir / safe_name
+        with target.open("wb") as out:
+            while chunk := await f.read(1024 * 1024):
+                bytes_written += len(chunk)
+                if bytes_written > max_upload_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=(f"Upload exceeded {max_upload_bytes // (1024*1024)} MB "
+                                f"(SMARTEMBED_MAX_UPLOAD_MB). Aborted at "
+                                f"{bytes_written // (1024*1024)} MB."),
+                    )
+                out.write(chunk)
+        saved_paths.append(target)
+
+    if not saved_paths:
+        raise HTTPException(status_code=400, detail="No valid files uploaded.")
+    corpus = load_corpus(saved_paths)
+    return corpus, len(saved_paths), tmpdir
+
+
+def _cleanup_tempdir(tmpdir: Path) -> None:
+    """Best-effort cleanup. Failures are non-fatal."""
+    try:
+        for child in tmpdir.iterdir():
+            try:
+                child.unlink(missing_ok=True)
+            except OSError:
+                pass
+        tmpdir.rmdir()
+    except OSError:
+        pass
+
+
 def _enforce_corpus_path_allowlist(p: Path) -> None:
     """Raise 403 if `p` is not under any allowed root. Resolves symlinks
     before comparison to defeat symlink-escape attacks."""
@@ -497,59 +554,21 @@ async def recommend_upload(
         config = json.loads(SAMPLE_CONFIG_PATH.read_text(encoding="utf-8"))
     _validate_or_400(config)
 
-    # Cap aggregate upload size to defend against accidental (or malicious)
-    # disk-fill. Default 100 MB across all files in one request; override
-    # via SMARTEMBED_MAX_UPLOAD_MB.
-    max_upload_bytes = int(_os.getenv("SMARTEMBED_MAX_UPLOAD_MB", "100")) * 1024 * 1024
-
-    tmpdir = Path(tempfile.mkdtemp(prefix="smartembed_api_"))
-    saved_paths: List[Path] = []
-    bytes_written = 0
+    tmpdir = None
     try:
-        for f in files:
-            if not f.filename:
-                continue
-            # Strip path components to avoid `..`-style escapes; keep extension.
-            safe_name = Path(f.filename).name
-            target = tmpdir / safe_name
-            with target.open("wb") as out:
-                while chunk := await f.read(1024 * 1024):
-                    bytes_written += len(chunk)
-                    if bytes_written > max_upload_bytes:
-                        # Abort writes immediately; cleanup runs in finally.
-                        raise HTTPException(
-                            status_code=413,
-                            detail=(f"Upload exceeded {max_upload_bytes // (1024*1024)} MB "
-                                    f"(SMARTEMBED_MAX_UPLOAD_MB). Aborted at "
-                                    f"{bytes_written // (1024*1024)} MB."),
-                        )
-                    out.write(chunk)
-            saved_paths.append(target)
-
-        if not saved_paths:
-            raise HTTPException(status_code=400, detail="No valid files uploaded.")
-
-        corpus = load_corpus(saved_paths)
+        corpus, n_files, tmpdir = await _save_uploads_and_load_corpus(files)
         rec, run_notes = _run_recommendation(corpus, config, use_llm, task=task)
         return RecommendResponse(
             recommendation=rec,
             config_used=config,
             used_llm=bool(use_llm),
             markdown_report=render_markdown_report(rec),
-            notes=[f"Analyzed {len(saved_paths)} uploaded file(s) totalling {len(corpus):,} chars."]
+            notes=[f"Analyzed {n_files} uploaded file(s) totalling {len(corpus):,} chars."]
                   + run_notes,
         )
     finally:
-        # Best-effort cleanup; harmless if it races.
-        for p in saved_paths:
-            try:
-                p.unlink(missing_ok=True)
-            except OSError:
-                pass
-        try:
-            tmpdir.rmdir()
-        except OSError:
-            pass
+        if tmpdir is not None:
+            _cleanup_tempdir(tmpdir)
 
 
 @app.post("/evaluate", response_model=EvaluateResponse)
@@ -582,6 +601,52 @@ def evaluate(req: EvaluateRequest) -> EvaluateResponse:
         heuristic_top_model=req.heuristic_top_model,
     )
     return EvaluateResponse(report=report.to_dict(), notes=notes)
+
+
+@app.post("/evaluate/upload", response_model=EvaluateResponse)
+async def evaluate_upload(
+    files: List[UploadFile] = File(..., description="Corpus files to evaluate on."),
+    candidates_json: str = Form(..., description="JSON-encoded list of candidate model dicts (same shape as /evaluate's `candidates` field)."),
+    n_queries: int = Form(30),
+    use_llm_for_queries: bool = Form(True),
+    heuristic_top_model: Optional[str] = Form(None),
+) -> EvaluateResponse:
+    """Multipart variant of /evaluate. Takes the same uploaded files
+    /recommend/upload took; the UI uses this so users in 'Upload files'
+    mode can validate without having to switch to 'Paste text'."""
+    try:
+        candidates = json.loads(candidates_json)
+        if not isinstance(candidates, list):
+            raise ValueError("candidates_json must be a JSON array")
+    except (ValueError, json.JSONDecodeError) as e:
+        raise HTTPException(status_code=400, detail=f"invalid candidates_json: {e}")
+
+    notes: List[str] = []
+    llm = None
+    if use_llm_for_queries:
+        try:
+            llm = build_llm()
+        except Exception as e:
+            notes.append(
+                f"Couldn't initialise local LLM for query generation ({type(e).__name__}: {e}). "
+                "Falling back to keyword extraction."
+            )
+
+    tmpdir = None
+    try:
+        corpus, n_files, tmpdir = await _save_uploads_and_load_corpus(files)
+        notes.append(f"Evaluating on {n_files} uploaded file(s) totalling {len(corpus):,} chars.")
+        report = evaluate_candidates(
+            corpus=corpus,
+            candidates=candidates,
+            n_queries=n_queries,
+            llm=llm,
+            heuristic_top_model=heuristic_top_model,
+        )
+        return EvaluateResponse(report=report.to_dict(), notes=notes)
+    finally:
+        if tmpdir is not None:
+            _cleanup_tempdir(tmpdir)
 
 
 @app.post("/validated_recommend", response_model=ValidatedRecommendResponse)
@@ -618,6 +683,57 @@ def validated_recommend(req: ValidatedRecommendRequest) -> ValidatedRecommendRes
         n_queries=req.n_queries,
     )
     return ValidatedRecommendResponse(context=ctx.to_dict(), notes=notes)
+
+
+@app.post("/validated_recommend/upload", response_model=ValidatedRecommendResponse)
+async def validated_recommend_upload(
+    files: List[UploadFile] = File(..., description="Corpus files."),
+    config_file: Optional[UploadFile] = File(None, description="Optional user config JSON."),
+    task: Optional[str] = Form(None),
+    use_llm: bool = Form(True),
+    n_queries: int = Form(30),
+) -> ValidatedRecommendResponse:
+    """Multipart variant of /validated_recommend. Runs the full 5-agent
+    pipeline on uploaded files so users in 'Upload files' mode aren't
+    cut off from the validated workflow."""
+    notes: List[str] = []
+    if config_file is not None:
+        try:
+            config = json.loads((await config_file.read()).decode("utf-8"))
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Invalid config JSON: {e}")
+    else:
+        config = json.loads(SAMPLE_CONFIG_PATH.read_text(encoding="utf-8"))
+    _validate_or_400(config)
+
+    resolved_task = _resolve_task(task, config, notes)
+
+    llm = None
+    if use_llm:
+        try:
+            llm = build_llm()
+        except Exception as e:
+            notes.append(
+                f"Couldn't initialise local LLM ({type(e).__name__}: {e}). "
+                "All agents will use deterministic fallback paths."
+            )
+
+    tmpdir = None
+    try:
+        corpus, n_files, tmpdir = await _save_uploads_and_load_corpus(files)
+        notes.append(f"Validated workflow over {n_files} uploaded file(s) totalling {len(corpus):,} chars.")
+        ctx = run_validated_recommendation(
+            corpus=corpus,
+            config=config,
+            task=resolved_task,
+            use_llm=use_llm,
+            llm=llm,
+            n_queries=n_queries,
+        )
+        return ValidatedRecommendResponse(context=ctx.to_dict(), notes=notes)
+    finally:
+        if tmpdir is not None:
+            _cleanup_tempdir(tmpdir)
 
 
 @app.get("/recommend/markdown", response_class=PlainTextResponse)
