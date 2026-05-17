@@ -356,6 +356,12 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--verbose", action="store_true", help="Enable debug-level logging.")
     p.add_argument("--no_llm", action="store_true",
                    help="Skip the local LLM and use the deterministic heuristic. Useful for CI or when Ollama isn't installed.")
+    p.add_argument("--evaluate", action="store_true",
+                   help="After producing the recommendation, empirically rank the top-3 candidates on the corpus "
+                        "(generates synthetic queries via the local LLM, computes MRR/nDCG/recall@k). "
+                        "Slow: 1-5 min on M4 Max with cached models.")
+    p.add_argument("--eval_queries", type=int, default=30,
+                   help="Number of synthetic queries to generate for --evaluate. Default 30. Bump to 100 for sharper estimates.")
     p.add_argument("--schema", default=str(DEFAULT_SCHEMA_PATH), help="Config schema path.")
     return p.parse_args(argv)
 
@@ -460,6 +466,40 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     log.info("Wrote JSON: %s", output_path)
     log.info("Wrote Markdown report: %s", md_path)
+
+    # Optional empirical evaluation pass — slow, opt-in.
+    if args.evaluate:
+        log.info("[eval] Running empirical evaluation on top-3 candidates (this is slow)...")
+        from src.agent_orchestrator import build_llm
+        from src.evaluator import evaluate_candidates
+
+        try:
+            llm = build_llm()
+            log.info("[eval] Using LLM for query generation.")
+        except Exception as e:
+            log.warning("[eval] Couldn't initialise LLM (%s). Using keyword-extraction fallback.", e)
+            llm = None
+
+        candidates = recommendation.get("recommended_models", [])
+        heuristic_top = candidates[0]["name"] if candidates else None
+        report = evaluate_candidates(
+            corpus=corpus,
+            candidates=candidates,
+            n_queries=args.eval_queries,
+            llm=llm,
+            heuristic_top_model=heuristic_top,
+        )
+        eval_path = output_path.with_name(output_path.stem + "_eval.json")
+        eval_path.write_text(json.dumps(report.to_dict(), indent=2), encoding="utf-8")
+        log.info("[eval] Wrote eval report: %s", eval_path)
+        log.info("[eval] Heuristic top: %s", report.heuristic_top)
+        log.info("[eval] Empirical top: %s%s",
+                 report.empirical_top,
+                 " — DIVERGED from heuristic, prefer empirical" if report.diverged else " (agrees with heuristic ✓)")
+        for r in report.results:
+            log.info("[eval]   %-50s MRR=%.3f nDCG@10=%.3f recall@10=%.3f",
+                     r.model, r.mrr, r.ndcg_at_10, r.recall_at_10)
+
     log.info("Analysis complete.")
     return 0
 

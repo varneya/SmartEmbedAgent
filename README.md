@@ -353,6 +353,7 @@ open http://localhost:8000/docs
 | `/recommend` | POST | JSON body: `corpus_text` or `corpus_paths`, optional inline `config`, `use_llm` |
 | `/recommend/upload` | POST | Multipart files (+ optional config_file). Same response shape |
 | `/recommend/markdown` | GET | Convenience: runs the bundled sample corpus, returns Markdown |
+| `/evaluate` | POST | **Empirically rank candidates** on YOUR corpus — generates synthetic queries via the local LLM, embeds with each candidate, returns MRR / nDCG@10 / recall@k. Slow (~1–5 min). |
 | `/healthz` | GET | Liveness + reports whether Ollama is reachable |
 | `/docs` | GET | FastAPI's auto-generated OpenAPI / Swagger UI |
 
@@ -438,7 +439,7 @@ SmartEmbedAgent ships both: the agent for production use, the deterministic fall
 - [x] **Microsoft Presidio backend** (opt-in)
 - [x] **Token-percentile-driven chunking decision** + multilingual-aware model selection
 - [x] **Index size + throughput estimate** + reranker recommendation in the output
-- [ ] **`--evaluate` flag** for empirical model bake-off — sample held-out docs, generate queries via the local LLM, score recall@10 across the top-3 candidates
+- [x] **`--evaluate` flag** for empirical model bake-off — sample held-out docs, generate queries via the local LLM, score recall@10 across the top-3 candidates. Also exposed as `POST /evaluate` and a "Run empirical evaluation" button in the UI.
 - [ ] **Near-duplicate detection** at corpus-load time (MinHash/SimHash) with dedupe suggestion
 - [ ] **Per-source breakdown** when the corpus has multiple sources (e.g. `Reddit reviews 2x longer than BikeWale; chunk those`)
 - [ ] **Vector store recommendation** (FAISS / Chroma / Qdrant) based on corpus size + write pattern

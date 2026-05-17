@@ -60,6 +60,7 @@
         <li><a href="#task" class="hover:underline">6. Task-aware scoring</a></li>
         <li><a href="#numbers" class="hover:underline">7. Concrete numbers</a></li>
         <li><a href="#llm" class="hover:underline">8. LLM agent overlay</a></li>
+        <li><a href="#evaluate" class="hover:underline">8b. Empirical validation</a></li>
         <li><a href="#privacy" class="hover:underline">9. Privacy &amp; security</a></li>
         <li><a href="#limits" class="hover:underline">10. Known limits</a></li>
       </ul>
@@ -231,6 +232,41 @@
       </ol>
       <p class="text-slate-700 mt-3 text-sm">
         We tested this with <code class="inline">hermes3:8b</code> (small Ollama model), <code class="inline">qwen3.5:9b</code>, and <code class="inline">qwen2.5:32b</code>. The 8B-class models are unreliable at producing valid JSON in the right schema; <code class="inline">qwen2.5:32b</code> is the smallest model we found that works consistently. Set the model via <code class="inline">SMARTEMBED_LLM_MODEL</code> env var.
+      </p>
+    </section>
+
+    <!-- 8b. Empirical validation -->
+    <section id="evaluate" class="bg-white rounded-xl border border-slate-200 p-6 shadow-sm mt-6">
+      <h2 class="text-xl font-semibold mb-4">8b. Empirical validation (opt-in)</h2>
+      <p class="text-slate-700 mb-3">
+        Sections 1–8 produce a recommendation from prior knowledge — hardware, corpus shape, task, model metadata. That's a strong prior but a weak posterior: it can't say which model <em>actually</em> wins on YOUR data. The <code class="inline">/evaluate</code> endpoint adds the posterior.
+      </p>
+      <p class="text-slate-700 mb-3">Pipeline:</p>
+      <ol class="space-y-3 mb-4">
+        <li class="flex gap-3"><span class="step-num">1</span><div><strong>Sample N docs from the corpus</strong> (default 30; deterministic given <code class="inline">seed=0</code> so reruns are reproducible).</div></li>
+        <li class="flex gap-3"><span class="step-num">2</span><div><strong>Generate one query per doc</strong> via the local LLM. Prompt: "write a realistic search query someone would use to find this passage." Falls back to keyword extraction (distinctive non-stopword tokens) when no LLM is available.</div></li>
+        <li class="flex gap-3"><span class="step-num">3</span><div><strong>For each candidate</strong> (typically the top-3 from a prior <code class="inline">/recommend</code>): load via <code class="inline">sentence-transformers</code>, embed corpus + queries with the model's prompt prefixes if any, compute cosine similarity (vectors are L2-normalized so dot = cosine).</div></li>
+        <li class="flex gap-3"><span class="step-num">4</span><div><strong>For each query</strong>, find the rank of its source doc in the sorted similarity list. Accumulate metrics.</div></li>
+        <li class="flex gap-3"><span class="step-num">5</span><div><strong>Report</strong>: per-model MRR, nDCG@10, recall@5, recall@10, elapsed seconds. Flag the empirical winner (highest MRR) and whether it <em>diverged</em> from the heuristic top-1.</div></li>
+      </ol>
+
+      <h3 class="text-sm font-semibold mb-2 text-slate-700">Metric definitions</h3>
+      <ul class="list-disc list-inside text-sm text-slate-700 space-y-1 mb-4">
+        <li><strong>MRR</strong> (Mean Reciprocal Rank): <code class="inline">mean(1 / rank_of_relevant)</code>. 1.0 = perfect (always rank 1). Most sensitive to the head of the ranking.</li>
+        <li><strong>nDCG@10</strong>: discounted gain at position 10. Rewards getting the right answer high in the ranking, with logarithmic decay below.</li>
+        <li><strong>recall@k</strong>: fraction of queries where the right doc was in the top-k retrieved. recall@10 ≈ 0.9 means "the right doc was in the top 10 nine times out of ten."</li>
+      </ul>
+
+      <h3 class="text-sm font-semibold mb-2 text-slate-700">Honest constraints</h3>
+      <ul class="list-disc list-inside text-sm text-slate-700 space-y-1 mb-4">
+        <li><strong>Queries are LLM-generated</strong>, not human-written. They're good enough for <em>relative</em> comparisons ("model A beats model B on this corpus") but aren't directly comparable to MTEB-style benchmarks with human-judged relevance.</li>
+        <li><strong>The relevance signal is "this query was written from this doc"</strong> — a proxy. The doc is one valid answer to that query; in real corpora, other docs may also be relevant and we'd mis-penalize a model for ranking them above the source.</li>
+        <li><strong>30 queries gives reliable separation when models differ by ≥10 MRR points.</strong> For tighter discrimination, bump <code class="inline">n_queries</code> to 100+ (linearly slower).</li>
+        <li><strong>Slow.</strong> 1–5 minutes for typical corpora with cached models; longer on first-run downloads. Has to be opt-in, not part of every <code class="inline">/recommend</code> call.</li>
+      </ul>
+
+      <p class="text-slate-700 text-sm">
+        Multi-agent extension (planned, PR 2): wrap this primitive in 5 agents — Suggester (existing), Query Generator, Evaluator, Decider (may pick a different winner than the suggester did), Reporter (synthesizes everything into a markdown report).
       </p>
     </section>
 

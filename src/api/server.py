@@ -86,7 +86,8 @@ from src.config_validator import (  # noqa: E402
     extract_pii_config,
     validate_config,
 )
-from src.agent_orchestrator import SUPPORTED_TASKS  # noqa: E402
+from src.agent_orchestrator import SUPPORTED_TASKS, build_llm  # noqa: E402
+from src.evaluator import evaluate_candidates  # noqa: E402
 
 
 SAMPLE_CONFIG_PATH = PROJECT_ROOT / "config" / "sample_config.json"
@@ -206,6 +207,30 @@ class RecommendResponse(BaseModel):
     config_used: Dict[str, Any]
     used_llm: bool
     markdown_report: str
+    notes: List[str] = Field(default_factory=list)
+
+
+class EvaluateRequest(BaseModel):
+    corpus_paths: Optional[List[str]] = Field(default=None)
+    corpus_text: Optional[str] = Field(default=None)
+    candidates: List[Dict[str, Any]] = Field(
+        ...,
+        description="List of candidate model entries. Each needs 'name'; "
+                    "may include 'embed_prefix' and 'query_prefix' for asymmetric models. "
+                    "Typically the top-3 from a prior /recommend response.",
+    )
+    n_queries: int = Field(default=30, ge=5, le=200,
+        description="How many synthetic queries to generate. 30 is a good speed/accuracy balance.")
+    use_llm_for_queries: bool = Field(default=True,
+        description="If True, asks the local Ollama LLM to write natural-language queries. "
+                    "If False, falls back to keyword extraction (no LLM dependency, lossier).")
+    heuristic_top_model: Optional[str] = Field(default=None,
+        description="Optional: name of the model the heuristic recommended first. "
+                    "Used to compute the `diverged` flag in the response.")
+
+
+class EvaluateResponse(BaseModel):
+    report: Dict[str, Any]
     notes: List[str] = Field(default_factory=list)
 
 
@@ -507,6 +532,38 @@ async def recommend_upload(
             tmpdir.rmdir()
         except OSError:
             pass
+
+
+@app.post("/evaluate", response_model=EvaluateResponse)
+def evaluate(req: EvaluateRequest) -> EvaluateResponse:
+    """Empirically rank candidate embedders on the supplied corpus.
+
+    This is slow (1-5 min typical on M4 Max with cached models, longer
+    on first-run downloads). It produces per-model MRR / nDCG@10 /
+    recall@k metrics measured on synthetic (query, source-doc) pairs
+    generated from the corpus itself."""
+    # Reuse the existing corpus-loading + path-allowlist machinery.
+    corpus = _load_text_for_request(req.corpus_paths, req.corpus_text)
+
+    notes: List[str] = []
+    llm = None
+    if req.use_llm_for_queries:
+        try:
+            llm = build_llm()
+        except Exception as e:
+            notes.append(
+                f"Couldn't initialise local LLM for query generation ({type(e).__name__}: {e}). "
+                "Falling back to keyword extraction."
+            )
+
+    report = evaluate_candidates(
+        corpus=corpus,
+        candidates=req.candidates,
+        n_queries=req.n_queries,
+        llm=llm,
+        heuristic_top_model=req.heuristic_top_model,
+    )
+    return EvaluateResponse(report=report.to_dict(), notes=notes)
 
 
 @app.get("/recommend/markdown", response_class=PlainTextResponse)

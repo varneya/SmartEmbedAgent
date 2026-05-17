@@ -218,6 +218,55 @@
         </div>
       </div>
 
+      <!-- Empirical evaluation (opt-in, slow) -->
+      <div class="bg-white rounded-xl border-2 border-blue-200 p-5 shadow-sm">
+        <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
+          <div>
+            <div class="text-xs text-slate-500 uppercase tracking-wide">🧪 Empirical evaluation</div>
+            <div class="text-sm text-slate-700">Validate the recommendation on YOUR corpus — generate synthetic queries via the local LLM, embed with each candidate, compute MRR / nDCG@10 / recall@k.</div>
+          </div>
+          <button id="run-eval"
+                  class="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition whitespace-nowrap">
+            Run evaluation (~1–5 min)
+          </button>
+        </div>
+        <div class="flex items-center gap-3 mt-3 text-xs text-slate-500">
+          <label class="flex items-center gap-1">
+            Queries:
+            <input id="eval-nqueries" type="number" min="5" max="200" value="30"
+                   class="w-16 border border-slate-300 rounded px-2 py-0.5 text-xs">
+          </label>
+          <label class="flex items-center gap-1 cursor-pointer">
+            <input id="eval-use-llm" type="checkbox" checked
+                   class="rounded border-slate-300 text-blue-600 focus:ring-blue-500">
+            Use LLM for query generation (off = keyword fallback)
+          </label>
+        </div>
+        <div id="eval-progress" class="hidden mt-3 text-sm text-blue-700">
+          <span class="inline-block animate-spin h-4 w-4 border-2 border-blue-300 border-t-blue-600 rounded-full align-middle"></span>
+          <span class="ml-2 align-middle">Generating queries + embedding candidates… (this is slow because it's running real models)</span>
+        </div>
+        <div id="eval-error" class="hidden mt-3 bg-rose-50 border border-rose-200 rounded p-3 text-sm text-rose-800"></div>
+        <div id="eval-results" class="hidden mt-4">
+          <div class="text-xs text-slate-500 uppercase tracking-wide mb-2">Per-model metrics</div>
+          <table class="w-full text-sm border-collapse">
+            <thead>
+              <tr class="text-left border-b border-slate-200">
+                <th class="py-2 pr-2 font-medium text-slate-600">Model</th>
+                <th class="py-2 px-2 text-right font-medium text-slate-600" title="Mean Reciprocal Rank — higher is better">MRR</th>
+                <th class="py-2 px-2 text-right font-medium text-slate-600" title="Normalized Discounted Cumulative Gain at 10">nDCG@10</th>
+                <th class="py-2 px-2 text-right font-medium text-slate-600">recall@5</th>
+                <th class="py-2 px-2 text-right font-medium text-slate-600">recall@10</th>
+                <th class="py-2 pl-2 text-right font-medium text-slate-600">Time</th>
+              </tr>
+            </thead>
+            <tbody id="eval-rows"></tbody>
+          </table>
+          <p id="eval-summary" class="text-sm text-slate-700 mt-3"></p>
+          <ul id="eval-notes" class="list-disc list-inside text-xs text-slate-500 mt-2"></ul>
+        </div>
+      </div>
+
       <!-- Downloads + raw JSON -->
       <div class="flex flex-wrap items-center gap-3">
         <button id="download-md"
@@ -507,6 +556,150 @@
       // Raw JSON
       document.getElementById('raw-json').textContent = JSON.stringify(rec, null, 2);
       results.classList.remove('hidden');
+    }
+
+    // ---------------------------------------------------------------
+    // Empirical evaluation (slow, opt-in)
+    // ---------------------------------------------------------------
+    document.getElementById('run-eval').addEventListener('click', async () => {
+      if (!lastResp) return;
+      const rec = lastResp.recommendation || {};
+      const candidates = rec.recommended_models || [];
+      if (candidates.length === 0) return;
+
+      // Re-derive whether we're in text-paste or files mode to know which
+      // corpus to send. /evaluate accepts corpus_text OR corpus_paths.
+      // For text mode we already have the text in the textarea; for files
+      // we don't have local paths (uploads were ephemeral) — fall back to
+      // re-running everything as corpus_text by reading the originally-
+      // submitted text. If only files were used we have to ask the user
+      // to paste-or-reupload. (Pragmatic for v1.)
+      const inText = !filesInput.classList.contains('hidden')
+        ? null
+        : document.getElementById('text-area').value.trim();
+      const evalProg = document.getElementById('eval-progress');
+      const evalErr = document.getElementById('eval-error');
+      const evalRes = document.getElementById('eval-results');
+      const evalBtn = document.getElementById('run-eval');
+
+      evalErr.classList.add('hidden');
+      evalRes.classList.add('hidden');
+
+      let body;
+      if (inText) {
+        body = { corpus_text: inText };
+      } else {
+        // Files mode — we don't have a server-readable path. Ask the user
+        // to paste their corpus into the text tab to evaluate.
+        evalErr.textContent = "Empirical eval needs the corpus text. " +
+          "Switch to the 'Paste text' tab and paste your corpus, then click 'Recommend' again, " +
+          "then click 'Run evaluation' here. (File-upload eval support coming in a later patch.)";
+        evalErr.classList.remove('hidden');
+        return;
+      }
+      body.candidates = candidates.map(m => ({
+        name: m.name, embed_prefix: m.embed_prefix || '', query_prefix: m.query_prefix || ''
+      }));
+      body.n_queries = parseInt(document.getElementById('eval-nqueries').value, 10) || 30;
+      body.use_llm_for_queries = document.getElementById('eval-use-llm').checked;
+      body.heuristic_top_model = candidates[0].name;
+
+      evalProg.classList.remove('hidden');
+      evalBtn.disabled = true;
+      try {
+        const resp = await fetch('/evaluate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        const json = await resp.json();
+        if (!resp.ok) throw new Error(json.detail ? JSON.stringify(json.detail) : `HTTP ${resp.status}`);
+        renderEval(json);
+      } catch (e) {
+        evalErr.textContent = `Eval failed: ${e.message}`;
+        evalErr.classList.remove('hidden');
+      } finally {
+        evalProg.classList.add('hidden');
+        evalBtn.disabled = false;
+      }
+    });
+
+    function renderEval(resp) {
+      const report = resp.report || {};
+      const results = report.results || [];
+      const rows = document.getElementById('eval-rows');
+      rows.replaceChildren();
+      // Highest MRR = empirical winner
+      const winner = report.empirical_top;
+      results.forEach(r => {
+        const tr = document.createElement('tr');
+        tr.className = r.model === winner
+          ? 'border-b border-slate-100 bg-emerald-50'
+          : 'border-b border-slate-100';
+        const cells = [
+          { text: r.model + (r.model === winner ? '  🏆' : ''), align: 'left', mono: true },
+          { text: r.mrr.toFixed(3), align: 'right' },
+          { text: r.ndcg_at_10.toFixed(3), align: 'right' },
+          { text: r.recall_at_5.toFixed(3), align: 'right' },
+          { text: r.recall_at_10.toFixed(3), align: 'right' },
+          { text: r.elapsed_seconds.toFixed(1) + 's', align: 'right', muted: true },
+        ];
+        cells.forEach((c, i) => {
+          const td = document.createElement('td');
+          let cls = 'py-2 ' + (c.align === 'right' ? 'text-right px-2' : 'pr-2');
+          if (c.mono) cls += ' font-mono text-xs';
+          if (c.muted) cls += ' text-slate-400';
+          td.className = cls;
+          td.textContent = c.text;
+          tr.appendChild(td);
+          // Error annotation if this model failed.
+          if (i === 0 && r.error) {
+            const errSpan = document.createElement('span');
+            errSpan.className = 'block text-xs text-rose-600 mt-1';
+            errSpan.textContent = `failed: ${r.error}`;
+            td.appendChild(errSpan);
+          }
+        });
+        rows.appendChild(tr);
+      });
+
+      // Summary line
+      const summary = document.getElementById('eval-summary');
+      if (report.diverged && winner && report.heuristic_top) {
+        summary.innerHTML = '';
+        summary.appendChild(document.createTextNode(`Empirical winner: `));
+        const sw = document.createElement('code');
+        sw.className = 'font-mono bg-emerald-100 px-1.5 py-0.5 rounded text-emerald-900';
+        sw.textContent = winner;
+        summary.appendChild(sw);
+        summary.appendChild(document.createTextNode(`. The heuristic picked `));
+        const sh = document.createElement('code');
+        sh.className = 'font-mono bg-slate-100 px-1.5 py-0.5 rounded';
+        sh.textContent = report.heuristic_top;
+        summary.appendChild(sh);
+        summary.appendChild(document.createTextNode(` — they disagree, prefer the empirical winner.`));
+      } else if (winner) {
+        summary.textContent = `Empirical winner: ${winner} — agrees with the heuristic top pick. ✓`;
+      } else {
+        summary.textContent = `No empirical winner — all candidates failed. See per-row errors above.`;
+      }
+
+      // Notes
+      const notesEl = document.getElementById('eval-notes');
+      notesEl.replaceChildren();
+      [...(report.notes || []), ...(resp.notes || [])].forEach(n => {
+        const li = document.createElement('li');
+        li.textContent = n;
+        notesEl.appendChild(li);
+      });
+
+      // Meta
+      const meta = document.createElement('li');
+      meta.textContent = `Generated ${report.n_queries_generated} queries via ${report.query_source}` +
+        (report.llm_model_used ? ` (${report.llm_model_used})` : '') + '.';
+      notesEl.appendChild(meta);
+
+      document.getElementById('eval-results').classList.remove('hidden');
     }
 
     // Toggle / downloads
