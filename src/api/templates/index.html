@@ -231,7 +231,7 @@
         <div class="flex items-center justify-between mb-2 flex-wrap gap-2">
           <div>
             <div class="text-xs text-slate-500 uppercase tracking-wide">🧪 Empirical evaluation</div>
-            <div class="text-sm text-slate-700">Validate the recommendation on YOUR corpus — generate synthetic queries via the local LLM, embed with each candidate, compute MRR / nDCG@10 / recall@k.</div>
+            <div class="text-sm text-slate-700">Validate the recommendation on YOUR corpus. Metric depends on the selected task: retrieval → MRR / nDCG@10, classification → macro-F1, clustering → V-measure, deduplication → AUC, similarity → Spearman ρ.</div>
           </div>
           <button id="run-eval"
                   class="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition whitespace-nowrap">
@@ -256,18 +256,9 @@
         </div>
         <div id="eval-error" class="hidden mt-3 bg-rose-50 border border-rose-200 rounded p-3 text-sm text-rose-800"></div>
         <div id="eval-results" class="hidden mt-4">
-          <div class="text-xs text-slate-500 uppercase tracking-wide mb-2">Per-model metrics</div>
+          <div class="text-xs text-slate-500 uppercase tracking-wide mb-2">Per-model metrics <span id="eval-task-pill" class="ml-2 inline-block px-2 py-0.5 bg-blue-100 text-blue-800 rounded text-[10px] uppercase font-medium"></span></div>
           <table class="w-full text-sm border-collapse">
-            <thead>
-              <tr class="text-left border-b border-slate-200">
-                <th class="py-2 pr-2 font-medium text-slate-600">Model</th>
-                <th class="py-2 px-2 text-right font-medium text-slate-600" title="Mean Reciprocal Rank — higher is better">MRR</th>
-                <th class="py-2 px-2 text-right font-medium text-slate-600" title="Normalized Discounted Cumulative Gain at 10">nDCG@10</th>
-                <th class="py-2 px-2 text-right font-medium text-slate-600">recall@5</th>
-                <th class="py-2 px-2 text-right font-medium text-slate-600">recall@10</th>
-                <th class="py-2 pl-2 text-right font-medium text-slate-600">Time</th>
-              </tr>
-            </thead>
+            <thead id="eval-head"></thead>
             <tbody id="eval-rows"></tbody>
           </table>
           <p id="eval-summary" class="text-sm text-slate-700 mt-3"></p>
@@ -681,6 +672,9 @@
       evalProg.classList.remove('hidden');
       evalBtn.disabled = true;
       try {
+        // Pass the currently-selected task so the evaluator computes
+        // the right metric (MRR / F1 / V-measure / AUC / Spearman ρ).
+        const evalTask = taskSelect.value || 'retrieval';
         let resp;
         if (lastSubmittedMode === 'files' && lastSubmittedFiles && lastSubmittedFiles.length > 0) {
           // Files mode → multipart /evaluate/upload (re-uses the same File objects
@@ -691,6 +685,7 @@
           fd.append('n_queries', String(nQueries));
           fd.append('use_llm_for_queries', useLlmForQueries ? 'true' : 'false');
           fd.append('heuristic_top_model', candidates[0].name);
+          fd.append('task', evalTask);
           resp = await fetch('/evaluate/upload', { method: 'POST', body: fd });
         } else {
           // Text mode → JSON /evaluate.
@@ -705,6 +700,7 @@
               n_queries: nQueries,
               use_llm_for_queries: useLlmForQueries,
               heuristic_top_model: candidates[0].name,
+              task: evalTask,
             }),
           });
         }
@@ -720,46 +716,99 @@
       }
     });
 
+    // Per-task: which columns to show in the eval table. Retrieval keeps
+    // the rich MRR / nDCG / recall@k view; non-retrieval tasks show only
+    // their one task-specific primary metric (plus model + elapsed time).
+    function evalColumnsForTask(task, primaryMetric) {
+      const baseModel = { label: 'Model', key: 'model', mono: true, align: 'left' };
+      const time = { label: 'Time', key: 'elapsed_seconds', align: 'right', muted: true,
+                     format: v => v.toFixed(1) + 's' };
+      if (task === 'retrieval') {
+        return [
+          baseModel,
+          { label: 'MRR', key: 'mrr', align: 'right', title: 'Mean Reciprocal Rank — higher is better', format: v => v.toFixed(3) },
+          { label: 'nDCG@10', key: 'ndcg_at_10', align: 'right', title: 'Normalized Discounted Cumulative Gain at 10', format: v => v.toFixed(3) },
+          { label: 'recall@5', key: 'recall_at_5', align: 'right', format: v => v.toFixed(3) },
+          { label: 'recall@10', key: 'recall_at_10', align: 'right', format: v => v.toFixed(3) },
+          time,
+        ];
+      }
+      // Non-retrieval — one primary-metric column.
+      const labels = {
+        f1_macro: { label: 'macro-F1', title: 'Average F1 across classes (stratified 5-fold CV with logistic regression on the embeddings)' },
+        v_measure: { label: 'V-measure', title: 'Harmonic mean of homogeneity and completeness vs LLM-assigned topic labels' },
+        auc: { label: 'AUC', title: 'ROC-AUC of cosine similarity discriminating LLM-paraphrase positives from random-pair negatives' },
+        spearman: { label: 'Spearman ρ', title: 'Rank correlation between embedding cosine similarity and LLM 1-5 ratings' },
+      };
+      const meta = labels[primaryMetric] || { label: primaryMetric, title: '' };
+      return [
+        baseModel,
+        { label: meta.label, key: 'primary_metric_value', align: 'right',
+          title: meta.title, format: v => v.toFixed(3) },
+        time,
+      ];
+    }
+
     function renderEval(resp) {
       const report = resp.report || {};
       const results = report.results || [];
+      const task = report.task || 'retrieval';
+      const primary = report.primary_metric_name || 'mrr';
+      const winner = report.empirical_top;
+
+      // Task pill near the table heading.
+      document.getElementById('eval-task-pill').textContent = task;
+
+      // Dynamically rebuild the table head + body for this task.
+      const cols = evalColumnsForTask(task, primary);
+      const head = document.getElementById('eval-head');
+      head.replaceChildren();
+      const headTr = document.createElement('tr');
+      headTr.className = 'text-left border-b border-slate-200';
+      cols.forEach((c, i) => {
+        const th = document.createElement('th');
+        th.className = 'py-2 font-medium text-slate-600 ' +
+          (c.align === 'right' ? 'px-2 text-right' : 'pr-2');
+        if (c.title) th.title = c.title;
+        th.textContent = c.label;
+        headTr.appendChild(th);
+      });
+      head.appendChild(headTr);
+
       const rows = document.getElementById('eval-rows');
       rows.replaceChildren();
-      // Highest MRR = empirical winner
-      const winner = report.empirical_top;
       results.forEach(r => {
         const tr = document.createElement('tr');
         tr.className = r.model === winner
           ? 'border-b border-slate-100 bg-emerald-50'
           : 'border-b border-slate-100';
-        const cells = [
-          { text: r.model + (r.model === winner ? '  🏆' : ''), align: 'left', mono: true },
-          { text: r.mrr.toFixed(3), align: 'right' },
-          { text: r.ndcg_at_10.toFixed(3), align: 'right' },
-          { text: r.recall_at_5.toFixed(3), align: 'right' },
-          { text: r.recall_at_10.toFixed(3), align: 'right' },
-          { text: r.elapsed_seconds.toFixed(1) + 's', align: 'right', muted: true },
-        ];
-        cells.forEach((c, i) => {
+        cols.forEach((c, i) => {
           const td = document.createElement('td');
           let cls = 'py-2 ' + (c.align === 'right' ? 'text-right px-2' : 'pr-2');
           if (c.mono) cls += ' font-mono text-xs';
           if (c.muted) cls += ' text-slate-400';
           td.className = cls;
-          td.textContent = c.text;
-          tr.appendChild(td);
-          // Error annotation if this model failed.
-          if (i === 0 && r.error) {
-            const errSpan = document.createElement('span');
-            errSpan.className = 'block text-xs text-rose-600 mt-1';
-            errSpan.textContent = `failed: ${r.error}`;
-            td.appendChild(errSpan);
+          let value = r[c.key];
+          if (c.key === 'model') {
+            td.textContent = value + (value === winner ? '  🏆' : '');
+            if (r.error) {
+              const errSpan = document.createElement('span');
+              errSpan.className = 'block text-xs text-rose-600 mt-1';
+              errSpan.textContent = `failed: ${r.error}`;
+              td.appendChild(errSpan);
+            }
+          } else if (typeof value === 'number') {
+            td.textContent = c.format ? c.format(value) : String(value);
+          } else {
+            td.textContent = value == null ? '—' : String(value);
           }
+          tr.appendChild(td);
         });
         rows.appendChild(tr);
       });
 
-      // Summary line
+      // Summary line — mentions the task's primary metric so the user
+      // doesn't have to guess which column drove the winner choice.
       const summary = document.getElementById('eval-summary');
       if (report.diverged && winner && report.heuristic_top) {
         summary.innerHTML = '';
@@ -768,14 +817,15 @@
         sw.className = 'font-mono bg-emerald-100 px-1.5 py-0.5 rounded text-emerald-900';
         sw.textContent = winner;
         summary.appendChild(sw);
-        summary.appendChild(document.createTextNode(`. The heuristic picked `));
+        summary.appendChild(document.createTextNode(` (by ${primary}). The heuristic picked `));
         const sh = document.createElement('code');
         sh.className = 'font-mono bg-slate-100 px-1.5 py-0.5 rounded';
         sh.textContent = report.heuristic_top;
         summary.appendChild(sh);
-        summary.appendChild(document.createTextNode(` — they disagree, prefer the empirical winner.`));
+        summary.appendChild(document.createTextNode(` — gap is large enough to prefer the empirical winner.`));
       } else if (winner) {
-        summary.textContent = `Empirical winner: ${winner} — agrees with the heuristic top pick. ✓`;
+        summary.textContent =
+          `Empirical winner: ${winner} (by ${primary}) — agrees with the heuristic top pick. ✓`;
       } else {
         summary.textContent = `No empirical winner — all candidates failed. See per-row errors above.`;
       }

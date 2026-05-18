@@ -45,12 +45,15 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
+import traceback
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 # Local module imports — these are deterministic, no LLM involved.
+from .config_validator import extract_pii_config
 from .corpus_analyzer import analyze_corpus
 from .device_profiler import get_hardware_specs
 from .pii_remover import remove_pii
@@ -661,7 +664,11 @@ EMBEDDING_CATALOGUE: List[Dict[str, Any]] = [
     {"name": "BAAI/bge-m3", "dim": 1024, "ctx_window": 8192,
      "size_mb": 2300, "multilingual": True, "requires_gpu_for_speed": True,
      "embed_prefix": "", "query_prefix": "",
-     "throughput_docs_per_sec": {"cpu": 10, "mps": 60}},
+     "throughput_docs_per_sec": {"cpu": 10, "mps": 60},
+     # MPS crashes with "masked_fill not supported for tensors of more than
+     # 2**32 elements" when batch_size * 8192 (max ctx) overflows. Cap batch
+     # to 8 so the maximum tile stays under 2**32 even on long inputs.
+     "eval_batch_size": 8},
     {"name": "mixedbread-ai/mxbai-embed-large-v1", "dim": 1024, "ctx_window": 512,
      "size_mb": 1300, "multilingual": False, "requires_gpu_for_speed": True,
      "embed_prefix": "",
@@ -1159,6 +1166,247 @@ def synthesize_heuristic_recommendation(ctx: AgentContext,
         "available_memory_budget_mb": available_budget_mb,
         "available_memory_basis_gb": round(available_gb, 2),
     }
+
+
+# ---------------------------------------------------------------------------
+# Recommendation entry point — deterministic + optional LLM overlay
+# ---------------------------------------------------------------------------
+#
+# Both the FastAPI server and the multi-agent Suggester call into
+# `recommend_with_optional_llm` so the heuristic-vs-LLM merge logic lives
+# in exactly one place. Historically each caller reimplemented its own
+# version, which caused the Suggester to silently bypass the LLM overlay
+# and produce a different top pick from /recommend.
+# ---------------------------------------------------------------------------
+
+# Fields we let the LLM override on top of the deterministic heuristic
+# when use_llm=True. Everything else (index_estimate,
+# reranker_recommendation, language_profile, memory_warnings,
+# recommended_models_available) stays deterministic — those are math /
+# lookup over corpus stats and gain nothing from LLM rephrasing, but they
+# DO get lost if the LLM doesn't know to emit them.
+_LLM_OVERRIDABLE_FIELDS = {
+    "recommended_models",
+    "reasoning_explanation",
+    "chunking_strategy",
+    "fine_tuning_advice",
+    "hardware_fit_analysis",
+}
+
+
+def _extract_json(text: str) -> Optional[Dict[str, Any]]:
+    """Salvage JSON from imperfect LLM output. Small Ollama models often
+    wrap structured output in markdown code fences ('```json ... ```'),
+    add a preamble ('Here is the recommendation:'), or trail with prose
+    after the closing brace. Tries in order:
+
+      1. Strict json.loads on the raw text.
+      2. Strip ```json ... ``` or ``` ... ``` fences and retry.
+      3. Find the first '{' and the last '}' and try the substring.
+
+    Returns the parsed dict or None.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return None
+    candidates: List[str] = [text.strip()]
+
+    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
+    if fence_match:
+        candidates.append(fence_match.group(1))
+
+    first = text.find("{")
+    last = text.rfind("}")
+    if first != -1 and last != -1 and last > first:
+        candidates.append(text[first:last + 1])
+
+    for c in candidates:
+        try:
+            parsed = json.loads(c)
+            if isinstance(parsed, dict):
+                return parsed
+        except (TypeError, json.JSONDecodeError):
+            continue
+    return None
+
+
+def _canonicalize_llm_recommended_models(
+    llm_models: List[Dict[str, Any]],
+    heuristic_models: List[Dict[str, Any]],
+    task: str,
+) -> List[Dict[str, Any]]:
+    """LLM agents sometimes paraphrase model names ('BGE-large' instead
+    of 'BAAI/bge-large-en-v1.5'). Downstream code (sentence-transformers,
+    the evaluator) needs canonical Hugging Face identifiers — paraphrased
+    names produce 404s from the Hub.
+
+    For each LLM-named model:
+      1. Canonicalize the name via fuzzy match against EMBEDDING_CATALOGUE
+      2. Replace the metadata fields (dim, size_mb, prefixes) with the
+         canonical entry's values so they're correct regardless of what
+         the LLM hallucinated
+      3. KEEP the LLM's rationale (that's the judgment we wanted to overlay)
+
+    If no candidate in the LLM output can be canonicalized, fall back
+    entirely to the heuristic models so the response is still usable.
+    """
+    canonicalized: List[Dict[str, Any]] = []
+    for i, m in enumerate(llm_models or []):
+        if not isinstance(m, dict):
+            continue
+        original_name = m.get("name", "")
+        rationale = m.get("rationale", "")
+        enriched = enrich_model_with_catalog(
+            name=original_name, task=task, rationale=rationale, rank=i + 1
+        )
+        if enriched is None:
+            continue
+        if enriched["name"] != original_name:
+            enriched["_llm_alias"] = original_name
+        canonicalized.append(enriched)
+
+    return canonicalized if canonicalized else (heuristic_models or [])
+
+
+def _merge_llm_into_heuristic(heuristic: Dict[str, Any],
+                              llm: Dict[str, Any]) -> Dict[str, Any]:
+    """Start from the deterministic recommendation (which has every field,
+    including the data-scientist additions). Overlay only the LLM's
+    judgment fields. Anything the LLM didn't emit keeps the heuristic
+    value, so the response is always shape-complete.
+
+    LLM-returned model names go through canonicalization before being
+    surfaced so downstream consumers (the evaluator, sentence-transformers)
+    always see real Hugging Face identifiers, not LLM paraphrases.
+    """
+    merged = dict(heuristic)
+    task = heuristic.get("task", "retrieval")
+    heuristic_models = heuristic.get("recommended_models", [])
+    for key in _LLM_OVERRIDABLE_FIELDS:
+        if key in llm and llm[key]:
+            if key == "recommended_models":
+                merged[key] = _canonicalize_llm_recommended_models(
+                    llm[key], heuristic_models, task
+                )
+            else:
+                merged[key] = llm[key]
+    return merged
+
+
+def recommend_with_optional_llm(
+    corpus: str,
+    config: Optional[Dict[str, Any]] = None,
+    task: str = "retrieval",
+    use_llm: bool = False,
+    llm: Optional[Any] = None,
+    verbose: bool = False,
+    tokenizer_name: str = "bert-base-uncased",
+) -> Tuple[Dict[str, Any], List[str]]:
+    """Produce a recommendation (always heuristic; LLM-overlaid when asked).
+
+    This is the single entry point used by BOTH the FastAPI server's
+    `/recommend` endpoint AND the multi-agent Suggester. Before this
+    helper existed, each caller had its own copy of the merge logic and
+    the Suggester silently bypassed the LLM overlay — so /recommend and
+    the validated workflow produced different top picks on the same
+    corpus.
+
+    Parameters
+    ----------
+    corpus : str
+        The raw text to analyze.
+    config : dict, optional
+        Full user config (matching config/config_schema.json). The PII
+        subsection is extracted internally.
+    task : str
+        retrieval | classification | clustering | deduplication | similarity.
+        Falls back to retrieval if unknown.
+    use_llm : bool
+        If True and `llm` is provided (or build_llm() succeeds), wrap the
+        deterministic recommendation with the LangChain agent's judgment.
+        On any failure (LLM down, bad JSON, wrong shape), falls back to
+        pure heuristic and records why in `notes`.
+    llm : optional
+        Pre-built LangChain BaseChatModel-shaped object. If None and
+        use_llm=True, we'll build one via build_llm().
+    verbose : bool
+        Forwarded to build_agent's AgentExecutor.
+
+    Returns
+    -------
+    (recommendation, notes) tuple. Notes carry user-visible signals such
+    as "LLM requested but fell back to heuristic because …" so the UI
+    never silently substitutes a different code path.
+    """
+    pii_cfg = extract_pii_config(config or {})
+    notes: List[str] = []
+    # Always compute the deterministic recommendation. It populates every
+    # field the API contract promises (incl. index_estimate, reranker,
+    # language_profile, task). The LLM either overrides the judgment
+    # fields or we fall back to it entirely.
+    heuristic = run_pipeline_no_llm(
+        corpus, user_config=pii_cfg, tokenizer_name=tokenizer_name, task=task,
+    )
+    if not use_llm:
+        return heuristic, notes
+
+    try:
+        executor = build_agent(
+            corpus=corpus, user_config=pii_cfg, llm=llm,
+            tokenizer_name=tokenizer_name, verbose=verbose,
+        )
+        response = executor.invoke({
+            "input": "Analyze the loaded corpus. Run device_profiler, then pii_remover, "
+                     "then corpus_analyzer, then output the final structured JSON recommendation.",
+        })
+        output = response.get("output", "") if isinstance(response, dict) else str(response)
+        parsed = _extract_json(output)
+        # The LLM might return valid JSON that doesn't match our schema —
+        # e.g. small models often dump the LAST tool's output (corpus_analyzer's
+        # raw stats) and call that the answer. Require at least
+        # `recommended_models` to consider the response usable.
+        if isinstance(parsed, dict) and "recommended_models" in parsed:
+            return _merge_llm_into_heuristic(heuristic, parsed), notes
+        if parsed is not None:
+            wrong_shape_keys = sorted(parsed.keys())[:6]
+            notes.append(
+                "LLM agent returned valid JSON but with the wrong shape "
+                f"(top-level keys: {wrong_shape_keys}). This typically means "
+                "the model dumped the last tool's output instead of synthesizing "
+                "a recommendation. Used deterministic heuristic instead. "
+                "Try a stronger model (qwen2.5:32b, llama3.3:70b) via "
+                "SMARTEMBED_LLM_MODEL."
+            )
+        else:
+            clipped = output.strip().replace("\n", " ")[:140]
+            notes.append(
+                "LLM agent returned non-JSON output (no JSON found). "
+                f"Sample: '{clipped}…'. Used deterministic heuristic instead. "
+                "Try a stronger model (qwen2.5:32b, llama3.3:70b) via "
+                "SMARTEMBED_LLM_MODEL."
+            )
+        return heuristic, notes
+    except ModuleNotFoundError as e:
+        notes.append(
+            f"LLM requested but '{e.name}' not installed. Run "
+            "`pip install -r requirements.txt` to enable the agentic path. "
+            "Used deterministic heuristic instead."
+        )
+        return heuristic, notes
+    except Exception as e:
+        traceback.print_exc()
+        notes.append(
+            f"LLM agent failed ({type(e).__name__}: {e}). "
+            "Used deterministic heuristic instead."
+        )
+        return heuristic, notes
+    finally:
+        # Encourage Python to release the AgentExecutor + LangChain tool
+        # wrappers + transient prompt objects we just built. Per-request
+        # accumulation was visible in macOS swap growth across repeated
+        # clicks on the UI 'Recommend' button.
+        if use_llm:
+            import gc as _gc
+            _gc.collect()
 
 
 # ---------------------------------------------------------------------------

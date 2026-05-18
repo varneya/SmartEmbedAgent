@@ -199,5 +199,194 @@ class TestEvaluateCandidatesEndToEnd(unittest.TestCase):
         self.assertEqual(report.empirical_top, None)
 
 
+@unittest.skipUnless(HAS_NUMPY, "numpy not installed")
+class TestTaskAwareDispatch(unittest.TestCase):
+    """PR 3: evaluate_candidates dispatches on `task` and populates
+    primary_metric_name / primary_metric_value uniformly across tasks."""
+
+    def _make_well_separated_embedder(self, n_clusters=3):
+        """Returns a fake _embed_texts that puts each text into one of
+        n_clusters perfectly-separated 1-hot positions. Cycles through
+        clusters by text-index so the mapping is deterministic."""
+        def fake(name, texts, prefix="", batch_size=None):
+            arr = np.zeros((len(texts), n_clusters), dtype=np.float32)
+            for i in range(len(texts)):
+                arr[i, i % n_clusters] = 1.0
+            return arr
+        return fake
+
+    @mock.patch("src.evaluator._embed_texts")
+    def test_retrieval_populates_primary_metric_as_mrr(self, mock_embed):
+        from src.evaluator import evaluate_candidates
+        mock_embed.side_effect = self._make_well_separated_embedder(20)
+        corpus = "\n\n".join([f"Doc {i} about widget {i % 4}." for i in range(20)])
+        report = evaluate_candidates(
+            corpus=corpus,
+            candidates=[{"name": "fake-a"}, {"name": "fake-b"}],
+            n_queries=5, llm=None, heuristic_top_model="fake-a",
+            task="retrieval",
+        )
+        self.assertEqual(report.task, "retrieval")
+        self.assertEqual(report.primary_metric_name, "mrr")
+        for r in report.results:
+            self.assertEqual(r.task, "retrieval")
+            self.assertEqual(r.primary_metric_name, "mrr")
+            self.assertEqual(r.primary_metric_value, r.mrr)
+
+    @mock.patch("src.evaluator._embed_texts")
+    def test_classification_uses_macro_f1(self, mock_embed):
+        """LLM labels 3 distinct classes; mocked embeddings cluster
+        perfectly by label → expect F1 = 1.0."""
+        from src.evaluator import evaluate_candidates
+        mock_embed.side_effect = self._make_well_separated_embedder(3)
+        corpus = "\n\n".join([f"Doc {i} category {i % 3}." for i in range(15)])
+
+        # LLM returns JSON {index: label} matching the embedding cycle (i % 3).
+        mock_llm = mock.Mock()
+        mock_resp = mock.Mock()
+        mock_resp.content = "{" + ", ".join(
+            f'"{i}": "cat{i % 3}"' for i in range(15)
+        ) + "}"
+        mock_llm.invoke.return_value = mock_resp
+
+        report = evaluate_candidates(
+            corpus=corpus, candidates=[{"name": "fake-clf"}],
+            n_queries=15, llm=mock_llm, heuristic_top_model="fake-clf",
+            task="classification",
+        )
+        self.assertEqual(report.task, "classification")
+        self.assertEqual(report.primary_metric_name, "f1_macro")
+        self.assertEqual(len(report.results), 1)
+        r = report.results[0]
+        self.assertIsNone(r.error)
+        self.assertGreater(r.primary_metric_value, 0.9)
+        self.assertEqual(r.task, "classification")
+        # Legacy retrieval fields are zero for non-retrieval tasks.
+        self.assertEqual(r.mrr, 0.0)
+
+    @mock.patch("src.evaluator._embed_texts")
+    def test_clustering_uses_v_measure(self, mock_embed):
+        from src.evaluator import evaluate_candidates
+        mock_embed.side_effect = self._make_well_separated_embedder(3)
+        corpus = "\n\n".join([f"Doc {i} topic {i % 3}." for i in range(15)])
+
+        mock_llm = mock.Mock()
+        mock_resp = mock.Mock()
+        mock_resp.content = "{" + ", ".join(
+            f'"{i}": "topic{i % 3}"' for i in range(15)
+        ) + "}"
+        mock_llm.invoke.return_value = mock_resp
+
+        report = evaluate_candidates(
+            corpus=corpus, candidates=[{"name": "fake-clu"}],
+            n_queries=15, llm=mock_llm, heuristic_top_model="fake-clu",
+            task="clustering",
+        )
+        self.assertEqual(report.primary_metric_name, "v_measure")
+        r = report.results[0]
+        self.assertIsNone(r.error)
+        self.assertGreater(r.primary_metric_value, 0.9)
+
+    @mock.patch("src.evaluator._embed_texts")
+    def test_deduplication_uses_auc(self, mock_embed):
+        """Anchors and their paraphrases get identical embeddings → AUC=1."""
+        from src.evaluator import evaluate_candidates
+        mock_embed.side_effect = self._make_well_separated_embedder(10)
+        corpus = "\n\n".join([f"Doc {i} unique content." for i in range(10)])
+
+        mock_llm = mock.Mock()
+        # Every invoke (paraphrase requests) returns a non-empty rewrite.
+        mock_resp = mock.Mock()
+        mock_resp.content = "Reworded version of the input passage."
+        mock_llm.invoke.return_value = mock_resp
+
+        report = evaluate_candidates(
+            corpus=corpus, candidates=[{"name": "fake-dedup"}],
+            n_queries=8, llm=mock_llm, heuristic_top_model="fake-dedup",
+            task="deduplication",
+        )
+        self.assertEqual(report.primary_metric_name, "auc")
+        r = report.results[0]
+        self.assertIsNone(r.error)
+        # Anchor i and paraphrase i share embedding row → cos=1; random
+        # non-pair → cos=0. Perfect separation → AUC=1.
+        self.assertGreater(r.primary_metric_value, 0.95)
+
+    def test_classification_without_llm_is_graceful(self):
+        """Non-retrieval tasks need an LLM. With no LLM, return a
+        clear note rather than crashing."""
+        from src.evaluator import evaluate_candidates
+        report = evaluate_candidates(
+            corpus="Doc a\n\nDoc b\n\nDoc c",
+            candidates=[{"name": "anything"}],
+            n_queries=5, llm=None,
+            task="classification",
+        )
+        self.assertEqual(report.task, "classification")
+        self.assertEqual(report.results, [])
+        self.assertTrue(any("LLM" in n for n in report.notes))
+
+    def test_unknown_task_falls_back_to_retrieval(self):
+        from src.evaluator import evaluate_candidates
+        report = evaluate_candidates(
+            corpus="Doc a\n\nDoc b",
+            candidates=[],  # short-circuit before embedding
+            n_queries=5, llm=None,
+            task="something-unknown",
+        )
+        self.assertEqual(report.task, "retrieval")
+
+
+@unittest.skipUnless(HAS_NUMPY, "numpy not installed")
+class TestPerModelBatchSize(unittest.TestCase):
+    """Fix 3: BGE-M3's catalog entry sets eval_batch_size=8 to avoid
+    the MPS 2**32-element tile crash on long-context inputs."""
+
+    def test_bge_m3_uses_smaller_batch_size(self):
+        from src.evaluator import _lookup_eval_batch_size
+        self.assertEqual(_lookup_eval_batch_size("BAAI/bge-m3"), 8)
+        # Other catalog models keep the default.
+        self.assertEqual(_lookup_eval_batch_size("sentence-transformers/all-MiniLM-L6-v2"), 64)
+        # Unknown models get the default.
+        self.assertEqual(_lookup_eval_batch_size("some/unknown-model"), 64)
+
+
+@unittest.skipUnless(HAS_NUMPY, "numpy not installed")
+class TestDivergenceMargin(unittest.TestCase):
+    """Fix 2: tiny MRR gaps (< 0.05) should NOT flag divergence — that's
+    noise on a 30-query eval and trains users to ignore the signal."""
+
+    @mock.patch("src.evaluator._embed_texts")
+    def test_tiny_margin_does_not_flag_divergence(self, mock_embed):
+        from src.evaluator import evaluate_candidates
+        # Two models that produce slightly different but very-similar embeddings.
+        def fake(name, texts, prefix="", batch_size=None):
+            arr = np.zeros((len(texts), 20), dtype=np.float32)
+            for i in range(len(texts)):
+                arr[i, i % 20] = 1.0
+                if name == "model-b":
+                    # Small perturbation that flips rank for a tiny number of queries.
+                    arr[i, (i + 1) % 20] = 0.01
+            return arr
+        mock_embed.side_effect = fake
+
+        corpus = "\n\n".join([f"Doc {i} widget." for i in range(20)])
+        report = evaluate_candidates(
+            corpus=corpus,
+            candidates=[{"name": "model-a"}, {"name": "model-b"}],
+            n_queries=10, llm=None,
+            heuristic_top_model="model-a",
+            task="retrieval",
+        )
+        # If both models score equal/near-equal MRR, diverged must be False
+        # (margin doesn't clear the 0.05 threshold).
+        if report.empirical_top and report.empirical_top != "model-a":
+            mrrs = {r.model: r.mrr for r in report.results}
+            margin = mrrs[report.empirical_top] - mrrs["model-a"]
+            if margin < 0.05:
+                self.assertFalse(report.diverged,
+                    f"diverged should be False when margin={margin:.3f} < 0.05")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

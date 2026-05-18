@@ -29,22 +29,63 @@ from .context import AgentContext, Decision
 # ----------------------------------------------------------------------
 # Deterministic decision tree (used as fallback OR when LLM is disabled)
 # ----------------------------------------------------------------------
+# Task-aware thresholds. Different metrics have different noise floors
+# and different "this model is fundamentally inadequate" cutoffs.
+#
+#   SWAP_THRESHOLD: empirical winner must beat heuristic top by ≥
+#                   this on the primary metric to justify swapping.
+#                   Smaller swaps are noise.
+#   FT_CEILING:     if no successful candidate clears this, recommend
+#                   fine-tuning rather than picking a base model.
+_TASK_SWAP_THRESHOLD: Dict[str, float] = {
+    "retrieval": 0.05,        # MRR
+    "classification": 0.05,   # F1 macro
+    "clustering": 0.05,       # V-measure
+    "deduplication": 0.02,    # AUC (small moves are real)
+    "similarity": 0.05,       # Spearman ρ
+}
+_TASK_FT_CEILING: Dict[str, float] = {
+    "retrieval": 0.25,        # MRR
+    "classification": 0.50,   # macro-F1 — a coin flip on 2 classes is 0.5
+    "clustering": 0.20,       # V-measure
+    "deduplication": 0.70,    # AUC — below 0.7 means embeddings don't separate dupes
+    "similarity": 0.20,       # Spearman ρ
+}
+# Default primary-metric NAME per task, for older eval reports that don't
+# emit `primary_metric_name`. Keeps back-compat with existing test stubs
+# that pre-date the task-aware schema.
+_TASK_DEFAULT_PRIMARY: Dict[str, str] = {
+    "retrieval": "mrr",
+    "classification": "f1_macro",
+    "clustering": "v_measure",
+    "deduplication": "auc",
+    "similarity": "spearman",
+}
+
+
+def _read_metric(r: Dict[str, Any], primary: str) -> float:
+    """Read the primary metric for a single result, falling back to MRR
+    for older eval reports that don't yet emit primary_metric_value."""
+    val = r.get("primary_metric_value")
+    if val is not None:
+        return float(val)
+    # Legacy / retrieval-only fallback
+    if primary == "mrr":
+        return float(r.get("mrr") or 0.0)
+    return float(r.get(primary) or 0.0)
+
+
 def _deterministic_decision(
     heuristic_top: str,
     eval_report: Dict[str, Any],
     available_top: Optional[str] = None,
 ) -> Decision:
-    """No-LLM decision rules. Documented thresholds:
-
-      MRR_SWAP_THRESHOLD: empirical winner must beat heuristic by ≥
-                          this margin to justify swapping. Small swaps
-                          are noise on 30 queries.
-
-      MRR_FT_CEILING:    if NO candidate clears this, recommend
-                         fine-tuning rather than picking a base model.
-    """
-    MRR_SWAP_THRESHOLD = 0.05
-    MRR_FT_CEILING = 0.25
+    """No-LLM decision rules. Task-aware: reads the report's
+    `primary_metric_name` and uses the matching swap / FT thresholds."""
+    task = eval_report.get("task", "retrieval")
+    primary = eval_report.get("primary_metric_name") or _TASK_DEFAULT_PRIMARY.get(task, "mrr")
+    SWAP_THRESHOLD = _TASK_SWAP_THRESHOLD.get(task, 0.05)
+    FT_CEILING = _TASK_FT_CEILING.get(task, 0.25)
 
     results: List[Dict[str, Any]] = eval_report.get("results", []) or []
     successful = [r for r in results if not r.get("error")]
@@ -62,26 +103,26 @@ def _deterministic_decision(
             agrees_with_heuristic=True,
         )
 
-    # Highest MRR wins among the successful candidates.
-    empirical_winner = max(successful, key=lambda r: r["mrr"])
+    # Highest primary-metric value wins among successful candidates.
+    empirical_winner = max(successful, key=lambda r: _read_metric(r, primary))
     winner_name = empirical_winner["model"]
-    winner_mrr = float(empirical_winner["mrr"])
-    heuristic_mrr = next(
-        (float(r["mrr"]) for r in successful if r["model"] == heuristic_top),
+    winner_score = _read_metric(empirical_winner, primary)
+    heuristic_score = next(
+        (_read_metric(r, primary) for r in successful if r["model"] == heuristic_top),
         None,
     )
 
     # All-low → recommend fine-tuning. The base-model choice barely matters.
-    if all(float(r["mrr"]) < MRR_FT_CEILING for r in successful):
+    if all(_read_metric(r, primary) < FT_CEILING for r in successful):
         return Decision(
             final_pick=heuristic_top,
             decision_basis="fine-tuning-needed",
             reasoning=(
-                f"Every candidate scored MRR < {MRR_FT_CEILING:.2f} on the "
-                "synthetic eval set. The base-model choice is not the bottleneck; "
-                "domain adaptation (contrastive fine-tuning on (query, positive) "
-                f"pairs from your corpus) will likely yield a bigger lift than "
-                f"swapping among {[r['model'] for r in successful]}."
+                f"Every candidate scored {primary} < {FT_CEILING:.2f} on the "
+                f"synthetic {task} eval. The base-model choice is not the "
+                "bottleneck; domain adaptation (contrastive fine-tuning on "
+                f"task-specific pairs from your corpus) will likely yield a bigger "
+                f"lift than swapping among {[r['model'] for r in successful]}."
             ),
             confidence="medium",
             agrees_with_heuristic=True,
@@ -90,33 +131,34 @@ def _deterministic_decision(
     # If heuristic top is one of the successful candidates and the
     # empirical winner doesn't beat it by enough, stay with heuristic.
     if (
-        heuristic_mrr is not None
-        and winner_mrr - heuristic_mrr < MRR_SWAP_THRESHOLD
+        heuristic_score is not None
+        and winner_score - heuristic_score < SWAP_THRESHOLD
     ):
         return Decision(
             final_pick=heuristic_top,
             decision_basis="heuristic",
             reasoning=(
-                f"Empirical winner is {winner_name} (MRR={winner_mrr:.3f}) but "
-                f"only beats heuristic top {heuristic_top} (MRR={heuristic_mrr:.3f}) "
-                f"by {winner_mrr - heuristic_mrr:+.3f} — within noise on a "
-                f"30-query eval. Sticking with the heuristic pick; it's the "
-                "smaller / faster / more conventional choice."
+                f"Empirical winner is {winner_name} ({primary}={winner_score:.3f}) "
+                f"but only beats heuristic top {heuristic_top} "
+                f"({primary}={heuristic_score:.3f}) by "
+                f"{winner_score - heuristic_score:+.3f} — within noise on a "
+                f"{len(successful)}-candidate {task} eval. Sticking with the "
+                "heuristic pick; it's the smaller / faster / more conventional choice."
             ),
             confidence="high",
             agrees_with_heuristic=True,
         )
 
     # Empirical winner is materially better → swap.
-    margin = (winner_mrr - heuristic_mrr) if heuristic_mrr is not None else winner_mrr
+    margin = (winner_score - heuristic_score) if heuristic_score is not None else winner_score
     return Decision(
         final_pick=winner_name,
         decision_basis="empirical",
         reasoning=(
-            f"Empirical winner {winner_name} (MRR={winner_mrr:.3f}) beats "
-            f"heuristic top {heuristic_top} (MRR={heuristic_mrr or 0:.3f}) by "
-            f"{margin:+.3f} on the synthetic eval — large enough to be real "
-            "signal, not noise. Recommending the empirical winner."
+            f"Empirical winner {winner_name} ({primary}={winner_score:.3f}) beats "
+            f"heuristic top {heuristic_top} ({primary}={heuristic_score or 0:.3f}) "
+            f"by {margin:+.3f} on the synthetic {task} eval — large enough to be "
+            "real signal, not noise. Recommending the empirical winner."
         ),
         confidence="high",
         agrees_with_heuristic=False,
@@ -129,29 +171,30 @@ def _deterministic_decision(
 _DECIDER_PROMPT = """You are the Decider agent in a multi-agent embedding-model recommender.
 
 A heuristic suggester already proposed candidates. An empirical evaluator
-then ran them on synthetic (query, source-doc) pairs sampled from the
-user's actual corpus, and reported per-model MRR / nDCG@10 / recall@k.
+then ran them on synthetic supervision derived from the user's actual
+corpus, and reported per-model {primary_metric} (the primary metric for
+task={task}).
 
 Your job: pick the single best model for the user, weighing both signals.
 
 Heuristic suggestion (top-3, in order):
 {heuristic_models}
 
-Empirical results (sorted by MRR descending):
+Empirical results (sorted by {primary_metric} descending):
 {empirical_table}
 
 Heuristic top: {heuristic_top}
 Empirical top: {empirical_top}
 
 Consider:
-  - Effect size: small MRR differences on a 30-query eval are noise.
-    A real difference is typically >= 0.05.
+  - Effect size: small {primary_metric} differences on a ~30-sample eval
+    are noise. A real difference is typically >= {swap_threshold:.2f}.
   - Model footprint: prefer smaller / faster models when quality is
     comparable.
-  - Operational pragmatism: a model that is 0.02 MRR worse but 5x
-    smaller is usually the better choice.
-  - If ALL candidates score MRR < 0.25, the base-model choice is not
-    the bottleneck — recommend fine-tuning instead.
+  - Operational pragmatism: a model that is slightly worse but 5x smaller
+    is usually the better choice.
+  - If ALL candidates score {primary_metric} < {ft_ceiling:.2f}, the
+    base-model choice is not the bottleneck — recommend fine-tuning.
   - If all candidates errored, return decision_basis "no-good-option".
 
 Reply with exactly this JSON object, nothing else:
@@ -165,16 +208,15 @@ Reply with exactly this JSON object, nothing else:
 """
 
 
-def _format_empirical_table(results: List[Dict[str, Any]]) -> str:
+def _format_empirical_table(results: List[Dict[str, Any]], primary: str) -> str:
     if not results:
         return "(no successful results)"
-    sorted_r = sorted(results, key=lambda r: -float(r.get("mrr") or 0))
-    lines = ["  Model                                              MRR    nDCG@10  recall@10"]
+    sorted_r = sorted(results, key=lambda r: -_read_metric(r, primary))
+    lines = [f"  Model                                              {primary}"]
     for r in sorted_r:
         err = " (FAILED)" if r.get("error") else ""
         lines.append(
-            f"  {r['model']:50s} {float(r.get('mrr') or 0):.3f}  "
-            f"{float(r.get('ndcg_at_10') or 0):.3f}     {float(r.get('recall_at_10') or 0):.3f}{err}"
+            f"  {r['model']:50s} {_read_metric(r, primary):.3f}{err}"
         )
     return "\n".join(lines)
 
@@ -220,9 +262,15 @@ def _llm_decision(
     to the deterministic decision tree."""
     heuristic_top = (heuristic_models or [{}])[0].get("name", "?")
     empirical_top = eval_report.get("empirical_top") or "?"
+    task = eval_report.get("task", "retrieval")
+    primary = eval_report.get("primary_metric_name") or "mrr"
     prompt = _DECIDER_PROMPT.format(
+        task=task,
+        primary_metric=primary,
+        swap_threshold=_TASK_SWAP_THRESHOLD.get(task, 0.05),
+        ft_ceiling=_TASK_FT_CEILING.get(task, 0.25),
         heuristic_models=_format_heuristic_list(heuristic_models),
-        empirical_table=_format_empirical_table(eval_report.get("results") or []),
+        empirical_table=_format_empirical_table(eval_report.get("results") or [], primary),
         heuristic_top=heuristic_top,
         empirical_top=empirical_top,
     )

@@ -1,10 +1,19 @@
 """
 Suggester agent — produces the initial top-3 recommendation.
 
-Thin wrapper around the existing deterministic pipeline
-(`run_pipeline_no_llm`). The LLM-overlay path (build_agent + invoke)
-runs at the orchestrator level when use_llm=True so the merge logic
-stays in one place.
+Delegates to `agent_orchestrator.recommend_with_optional_llm`, which is
+the SAME helper the FastAPI `/recommend` endpoint calls. That guarantees
+the Suggester's output and `/recommend`'s output match on the same
+inputs — historically they didn't, because the Suggester always took
+the heuristic-only path regardless of `ctx.use_llm`, while `/recommend`
+applied the LLM overlay. That divergence made the validated-workflow
+final pick look like it disagreed with the top recommendation card.
+
+When `ctx.use_llm=True` and `ctx.llm` is provided, the LLM overlay is
+applied on top of the deterministic heuristic. On any LLM failure
+(server down, bad JSON, wrong shape), the helper falls back to pure
+heuristic and surfaces the reason in `notes`, which we forward into
+`ctx.per_agent_notes` so the UI sees what happened.
 
 Output: ctx.recommendation populated with the full schema
 (recommended_models, chunking_strategy, fine_tuning_advice,
@@ -15,26 +24,34 @@ available_memory_budget_mb, available_memory_basis_gb).
 
 from __future__ import annotations
 
-from typing import Any, Dict
-
-from src.agent_orchestrator import run_pipeline_no_llm
-from src.config_validator import extract_pii_config
+from src.agent_orchestrator import recommend_with_optional_llm
 from .context import AgentContext
 
 
 def run(ctx: AgentContext) -> AgentContext:
-    """Produce the deterministic recommendation. The LLM overlay is
-    applied at the orchestrator level so the merge stays in one place."""
-    pii_cfg = extract_pii_config(ctx.config or {})
-    ctx.recommendation = run_pipeline_no_llm(
+    """Produce the recommendation, with optional LLM overlay when
+    `ctx.use_llm=True` and `ctx.llm` is available."""
+    use_llm = bool(ctx.use_llm and ctx.llm is not None)
+    rec, notes = recommend_with_optional_llm(
         corpus=ctx.corpus,
-        user_config=pii_cfg,
+        config=ctx.config or {},
         task=ctx.task,
+        use_llm=use_llm,
+        llm=ctx.llm,
+        verbose=False,
     )
-    top = (ctx.recommendation.get("recommended_models") or [{}])[0]
+    ctx.recommendation = rec
+    for n in notes:
+        ctx.add_note("suggester", n)
+
+    top = (rec.get("recommended_models") or [{}])[0]
+    # Phrasing kept as "Heuristic top" / "LLM-overlaid top" so the existing
+    # test (which asserts the literal "Heuristic top" string for the no-LLM
+    # path) and downstream log scrapers stay backwards-compatible.
+    path_label = "LLM-overlaid top" if use_llm else "Heuristic top"
     ctx.add_note(
         "suggester",
-        f"Heuristic top: {top.get('name', '?')} "
-        f"(task={ctx.task}; {len(ctx.recommendation.get('recommended_models', []))} candidates)."
+        f"{path_label}: {top.get('name', '?')} "
+        f"(task={ctx.task}; {len(rec.get('recommended_models', []))} candidates).",
     )
     return ctx

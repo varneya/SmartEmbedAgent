@@ -20,9 +20,8 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
-import traceback
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple
 
 # Make the project root importable when running `python -m src.api.server`
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -41,55 +40,16 @@ except ImportError as e:
     ) from e
 
 # Import the existing project guts — zero changes required to those modules.
-import re
-
 from main import load_corpus, render_markdown_report  # noqa: E402
-from src.agent_orchestrator import build_agent, run_pipeline_no_llm  # noqa: E402
-
-
-def _extract_json(text: str) -> Optional[Dict[str, Any]]:
-    """Salvage JSON from imperfect LLM output. Small Ollama models often
-    wrap structured output in markdown code fences ('```json ... ```'),
-    add a preamble ('Here is the recommendation:'), or trail with prose
-    after the closing brace. We try in order:
-
-      1. Strict json.loads on the raw text.
-      2. Strip ```json ... ``` or ``` ... ``` fences and retry.
-      3. Find the first '{' and the last '}' and try the substring.
-
-    Returns the parsed dict or None. None means we should fall back.
-    """
-    if not isinstance(text, str) or not text.strip():
-        return None
-    candidates: List[str] = [text.strip()]
-
-    fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.DOTALL)
-    if fence_match:
-        candidates.append(fence_match.group(1))
-
-    first = text.find("{")
-    last = text.rfind("}")
-    if first != -1 and last != -1 and last > first:
-        candidates.append(text[first:last + 1])
-
-    for c in candidates:
-        try:
-            parsed = json.loads(c)
-            if isinstance(parsed, dict):
-                return parsed
-        except (TypeError, json.JSONDecodeError):
-            continue
-    return None
 from src.config_validator import (  # noqa: E402
     DEFAULT_SCHEMA_PATH,
     extract_model_preferences,
-    extract_pii_config,
     validate_config,
 )
 from src.agent_orchestrator import (  # noqa: E402
     SUPPORTED_TASKS,
     build_llm,
-    enrich_model_with_catalog,
+    recommend_with_optional_llm,
     unload_ollama_model,
 )
 from src.evaluator import evaluate_candidates  # noqa: E402
@@ -283,13 +243,20 @@ class EvaluateRequest(BaseModel):
                     "Typically the top-3 from a prior /recommend response.",
     )
     n_queries: int = Field(default=30, ge=5, le=200,
-        description="How many synthetic queries to generate. 30 is a good speed/accuracy balance.")
+        description="How many synthetic supervision samples to generate. "
+                    "30 is a good speed/accuracy balance.")
     use_llm_for_queries: bool = Field(default=True,
-        description="If True, asks the local Ollama LLM to write natural-language queries. "
-                    "If False, falls back to keyword extraction (no LLM dependency, lossier).")
+        description="If True, asks the local Ollama LLM for task-appropriate "
+                    "supervision (queries for retrieval, labels for classification "
+                    "/ clustering, paraphrases for dedup, ratings for similarity). "
+                    "If False, only retrieval works (keyword-fallback queries).")
     heuristic_top_model: Optional[str] = Field(default=None,
         description="Optional: name of the model the heuristic recommended first. "
                     "Used to compute the `diverged` flag in the response.")
+    task: Optional[str] = Field(default=None,
+        description=("Workload type. One of: retrieval (default), classification, "
+                     "clustering, deduplication, similarity. Drives which metric is "
+                     "computed (MRR / F1 / V-measure / AUC / Spearman ρ)."))
 
 
 class EvaluateResponse(BaseModel):
@@ -361,84 +328,6 @@ def _load_text_for_request(corpus_paths: Optional[List[str]],
         raise HTTPException(status_code=400, detail=str(e))
 
 
-# Fields we let the LLM override on top of the deterministic heuristic
-# when use_llm=True. Everything else (index_estimate,
-# reranker_recommendation, language_profile) stays deterministic — those
-# are just math/lookup over corpus stats and gain nothing from LLM
-# rephrasing, but they DO get lost if the LLM doesn't know to emit them.
-_LLM_OVERRIDABLE_FIELDS = {
-    "recommended_models",
-    "reasoning_explanation",
-    "chunking_strategy",
-    "fine_tuning_advice",
-    "hardware_fit_analysis",
-}
-
-
-def _canonicalize_llm_recommended_models(
-    llm_models: List[Dict[str, Any]],
-    heuristic_models: List[Dict[str, Any]],
-    task: str,
-) -> List[Dict[str, Any]]:
-    """LLM agents sometimes paraphrase model names ('BGE-large' instead
-    of 'BAAI/bge-large-en-v1.5'). Downstream code (sentence-transformers,
-    the evaluator) needs canonical Hugging Face identifiers — paraphrased
-    names produce 404s from the Hub.
-
-    For each LLM-named model:
-      1. Canonicalize the name via fuzzy match against EMBEDDING_CATALOGUE
-      2. Replace the metadata fields (dim, size_mb, prefixes) with the
-         canonical entry's values so they're correct regardless of what
-         the LLM hallucinated
-      3. KEEP the LLM's rationale (that's the judgment we wanted to overlay)
-
-    If no candidate in the LLM output can be canonicalized, fall back
-    entirely to the heuristic models so the response is still usable.
-    """
-    canonicalized: List[Dict[str, Any]] = []
-    for i, m in enumerate(llm_models or []):
-        if not isinstance(m, dict):
-            continue
-        original_name = m.get("name", "")
-        rationale = m.get("rationale", "")
-        enriched = enrich_model_with_catalog(
-            name=original_name, task=task, rationale=rationale, rank=i + 1
-        )
-        if enriched is None:
-            continue
-        if enriched["name"] != original_name:
-            # Record the original alias for debugging / UI surfacing.
-            enriched["_llm_alias"] = original_name
-        canonicalized.append(enriched)
-
-    return canonicalized if canonicalized else (heuristic_models or [])
-
-
-def _merge_llm_into_heuristic(heuristic: Dict[str, Any],
-                              llm: Dict[str, Any]) -> Dict[str, Any]:
-    """Start from the deterministic recommendation (which has every field,
-    including the new data-scientist additions). Overlay only the LLM's
-    judgment fields. Anything the LLM didn't emit keeps the heuristic
-    value, so the response is always shape-complete.
-
-    LLM-returned model names go through canonicalization before being
-    surfaced so downstream consumers (the evaluator, sentence-transformers)
-    always see real Hugging Face identifiers, not LLM paraphrases.
-    """
-    merged = dict(heuristic)
-    task = heuristic.get("task", "retrieval")
-    heuristic_models = heuristic.get("recommended_models", [])
-    for key in _LLM_OVERRIDABLE_FIELDS:
-        if key in llm and llm[key]:
-            if key == "recommended_models":
-                merged[key] = _canonicalize_llm_recommended_models(
-                    llm[key], heuristic_models, task
-                )
-            else:
-                merged[key] = llm[key]
-    return merged
-
-
 def _resolve_task(req_task: Optional[str], config: Dict[str, Any],
                   notes: List[str]) -> str:
     """Pick the task string, with precedence:  request override > config field
@@ -456,74 +345,20 @@ def _resolve_task(req_task: Optional[str], config: Dict[str, Any],
 
 def _run_recommendation(corpus: str, config: Dict[str, Any], use_llm: bool,
                         task: Optional[str] = None) -> Tuple[Dict[str, Any], List[str]]:
-    """Returns (recommendation, notes). Notes carry user-visible signals
-    such as 'LLM requested but fell back to heuristic because …' so the
-    UI never silently substitutes a different code path."""
-    pii_cfg = extract_pii_config(config)
+    """Thin wrapper around `recommend_with_optional_llm` that resolves the
+    task string from the request/config before delegating. Lives here so
+    callers don't have to import config-validation plumbing themselves.
+
+    The actual heuristic + LLM-overlay logic is in agent_orchestrator so
+    the multi-agent Suggester can call the exact same code path."""
     notes: List[str] = []
     resolved_task = _resolve_task(task, config, notes)
-    # Always compute the deterministic recommendation. It populates every
-    # field the API contract promises (incl. index_estimate, reranker,
-    # language_profile, task). The LLM either overrides the judgment fields
-    # or we fall back to it entirely.
-    heuristic = run_pipeline_no_llm(corpus, user_config=pii_cfg, task=resolved_task)
-    if not use_llm:
-        return heuristic, notes
-    try:
-        executor = build_agent(corpus=corpus, user_config=pii_cfg, verbose=False)
-        response = executor.invoke({
-            "input": "Analyze the loaded corpus. Run device_profiler, then pii_remover, "
-                     "then corpus_analyzer, then output the final structured JSON recommendation.",
-        })
-        output = response.get("output", "") if isinstance(response, dict) else str(response)
-        parsed = _extract_json(output)
-        # The LLM might return valid JSON that doesn't match our schema —
-        # e.g. small models often dump the LAST tool's output (corpus_analyzer's
-        # raw stats) and call that the answer. Require at least
-        # `recommended_models` to consider the response usable.
-        if isinstance(parsed, dict) and "recommended_models" in parsed:
-            # Merge the LLM's judgment fields onto the deterministic
-            # baseline so index_estimate / reranker / language_profile are
-            # always present.
-            return _merge_llm_into_heuristic(heuristic, parsed), notes
-        if parsed is not None:
-            wrong_shape_keys = sorted(parsed.keys())[:6]
-            notes.append(
-                "LLM agent returned valid JSON but with the wrong shape "
-                f"(top-level keys: {wrong_shape_keys}). This typically means "
-                "the model dumped the last tool's output instead of synthesizing "
-                "a recommendation. Used deterministic heuristic instead. "
-                "Try a stronger model (qwen2.5:32b, llama3.3:70b) via "
-                "SMARTEMBED_LLM_MODEL."
-            )
-        else:
-            clipped = output.strip().replace("\n", " ")[:140]
-            notes.append(
-                "LLM agent returned non-JSON output (no JSON found). "
-                f"Sample: '{clipped}…'. Used deterministic heuristic instead. "
-                "Try a stronger model (qwen2.5:32b, llama3.3:70b) via "
-                "SMARTEMBED_LLM_MODEL."
-            )
-        return heuristic, notes
-    except ModuleNotFoundError as e:
-        notes.append(
-            f"LLM requested but '{e.name}' not installed. Run "
-            "`pip install -r requirements.txt` to enable the agentic path. "
-            "Used deterministic heuristic instead."
-        )
-        return heuristic, notes
-    except Exception as e:
-        traceback.print_exc()
-        notes.append(f"LLM agent failed ({type(e).__name__}: {e}). Used deterministic heuristic instead.")
-        return heuristic, notes
-    finally:
-        # Encourage Python to release the AgentExecutor + LangChain tool
-        # wrappers + transient prompt objects we just built. Per-request
-        # accumulation was visible in macOS swap growth across repeated
-        # clicks on the UI 'Recommend' button.
-        if use_llm:
-            import gc as _gc
-            _gc.collect()
+    rec, llm_notes = recommend_with_optional_llm(
+        corpus=corpus, config=config, task=resolved_task,
+        use_llm=use_llm, verbose=False,
+    )
+    notes.extend(llm_notes)
+    return rec, notes
 
 
 # ---------------------------------------------------------------------------
@@ -657,12 +492,23 @@ def evaluate(req: EvaluateRequest) -> EvaluateResponse:
                 "Falling back to keyword extraction."
             )
 
+    # Resolve task — request override > config default ('retrieval').
+    # Unknown values fall back to 'retrieval' with a user-visible note.
+    resolved_task = req.task or "retrieval"
+    if resolved_task not in SUPPORTED_TASKS:
+        notes.append(
+            f"Unknown task '{resolved_task}'. Falling back to 'retrieval'. "
+            f"Supported: {list(SUPPORTED_TASKS)}."
+        )
+        resolved_task = "retrieval"
+
     report = evaluate_candidates(
         corpus=corpus,
         candidates=req.candidates,
         n_queries=req.n_queries,
         llm=llm,
         heuristic_top_model=req.heuristic_top_model,
+        task=resolved_task,
     )
     return EvaluateResponse(report=report.to_dict(), notes=notes)
 
@@ -674,6 +520,9 @@ async def evaluate_upload(
     n_queries: int = Form(30),
     use_llm_for_queries: bool = Form(True),
     heuristic_top_model: Optional[str] = Form(None),
+    task: Optional[str] = Form(None,
+        description="Workload type. retrieval | classification | clustering | "
+                    "deduplication | similarity. Drives which metric is computed."),
 ) -> EvaluateResponse:
     """Multipart variant of /evaluate. Takes the same uploaded files
     /recommend/upload took; the UI uses this so users in 'Upload files'
@@ -696,6 +545,14 @@ async def evaluate_upload(
                 "Falling back to keyword extraction."
             )
 
+    resolved_task = task or "retrieval"
+    if resolved_task not in SUPPORTED_TASKS:
+        notes.append(
+            f"Unknown task '{resolved_task}'. Falling back to 'retrieval'. "
+            f"Supported: {list(SUPPORTED_TASKS)}."
+        )
+        resolved_task = "retrieval"
+
     tmpdir = None
     try:
         corpus, n_files, tmpdir = await _save_uploads_and_load_corpus(files)
@@ -706,6 +563,7 @@ async def evaluate_upload(
             n_queries=n_queries,
             llm=llm,
             heuristic_top_model=heuristic_top_model,
+            task=resolved_task,
         )
         return EvaluateResponse(report=report.to_dict(), notes=notes)
     finally:

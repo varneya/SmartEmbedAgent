@@ -39,6 +39,7 @@ def run(ctx: AgentContext) -> AgentContext:
         llm=ctx.llm if ctx.use_llm else None,
         seed=ctx.seed,
         heuristic_top_model=heuristic_top,
+        task=ctx.task,
     )
     ctx.eval_report = report.to_dict()
 
@@ -46,10 +47,15 @@ def run(ctx: AgentContext) -> AgentContext:
     if not successful:
         ctx.add_note("evaluator", "All candidates failed during embedding/inference. See per-row errors.")
     else:
-        top = max(successful, key=lambda r: r.mrr)
+        # Rank on the task's primary metric — for retrieval this is MRR,
+        # for classification it's macro-F1, etc. The EvalResult schema
+        # exposes both legacy fields (mrr / ndcg_at_10) and the uniform
+        # primary_metric_value, so the Decider downstream stays simple.
+        top = max(successful, key=lambda r: r.primary_metric_value)
         ctx.add_note(
             "evaluator",
-            f"Empirical winner: {top.model} (MRR={top.mrr:.3f}, nDCG@10={top.ndcg_at_10:.3f}). "
+            f"Empirical winner: {top.model} "
+            f"({top.primary_metric_name}={top.primary_metric_value:.3f}). "
             + ("Diverges from heuristic top." if report.diverged
                else "Agrees with heuristic top.")
         )
