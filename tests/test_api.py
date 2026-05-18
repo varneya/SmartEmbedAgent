@@ -329,6 +329,37 @@ class TestMultipartEvaluateAndValidated(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_API, "FastAPI extras not installed")
+class TestUnloadLLM(unittest.TestCase):
+    """POST /unload_llm proxies to agent_orchestrator.unload_ollama_model.
+    We mock that call so the test doesn't depend on a running Ollama."""
+
+    def setUp(self):
+        self.client = TestClient(app)
+
+    def test_unload_llm_returns_status_dict(self):
+        from unittest import mock
+        with mock.patch("src.api.server.unload_ollama_model") as m:
+            m.return_value = {"unloaded": True, "model": "qwen2.5:32b", "elapsed_ms": 42}
+            r = self.client.post("/unload_llm")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertTrue(body["unloaded"])
+        self.assertEqual(body["model"], "qwen2.5:32b")
+        self.assertEqual(body["elapsed_ms"], 42)
+
+    def test_unload_llm_surfaces_error(self):
+        from unittest import mock
+        with mock.patch("src.api.server.unload_ollama_model") as m:
+            m.return_value = {"unloaded": False, "model": "qwen2.5:32b",
+                              "error": "URLError: Connection refused"}
+            r = self.client.post("/unload_llm")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertFalse(body["unloaded"])
+        self.assertIn("Connection refused", body["error"])
+
+
+@unittest.skipUnless(HAS_API, "FastAPI extras not installed")
 class TestMarkdownDemo(unittest.TestCase):
     def setUp(self):
         self.client = TestClient(app)

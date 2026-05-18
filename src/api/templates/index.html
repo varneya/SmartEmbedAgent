@@ -94,17 +94,25 @@
           <span id="task-hint" class="text-xs text-slate-400 ml-1"></span>
         </div>
 
-        <div class="flex items-center justify-between">
+        <div class="flex items-center justify-between flex-wrap gap-3">
           <label class="flex items-center gap-2 text-sm text-slate-600 cursor-pointer">
             <input id="use-llm" type="checkbox" class="rounded border-slate-300 text-blue-600 focus:ring-blue-500">
             <span>Use local LLM agent (Ollama, ~30s)</span>
             <span class="text-xs text-slate-400">— off = fast deterministic heuristic</span>
           </label>
-          <button id="submit"
-                  class="px-5 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition">
-            Recommend a model
-          </button>
+          <div class="flex items-center gap-2">
+            <button id="unload-llm"
+                    title="Force-unload the Ollama model (frees ~28 GB for qwen2.5:32b). Auto-unloads after 60s of inactivity anyway."
+                    class="px-3 py-1.5 text-xs text-slate-700 border border-slate-300 rounded-md hover:bg-slate-100 disabled:opacity-50 transition">
+              💤 Unload LLM
+            </button>
+            <button id="submit"
+                    class="px-5 py-2 bg-blue-600 text-white text-sm font-medium rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition">
+              Recommend a model
+            </button>
+          </div>
         </div>
+        <div id="unload-toast" class="hidden text-xs px-3 py-1.5 rounded-md self-end"></div>
       </div>
     </section>
 
@@ -406,6 +414,34 @@
     let lastSubmittedMode = null;    // 'text' | 'files'
     let lastSubmittedFiles = null;   // FileList from the last upload-mode submit
     let lastSubmittedText = null;    // string from the last text-mode submit
+
+    // Unload-LLM button — calls /unload_llm and shows a small toast.
+    const unloadBtn = document.getElementById('unload-llm');
+    const unloadToast = document.getElementById('unload-toast');
+    unloadBtn.addEventListener('click', async () => {
+      unloadBtn.disabled = true;
+      unloadToast.className = 'text-xs px-3 py-1.5 rounded-md self-end bg-slate-100 text-slate-600';
+      unloadToast.textContent = 'Unloading…';
+      unloadToast.classList.remove('hidden');
+      try {
+        const resp = await fetch('/unload_llm', { method: 'POST' });
+        const json = await resp.json();
+        if (json.unloaded) {
+          unloadToast.className = 'text-xs px-3 py-1.5 rounded-md self-end bg-emerald-50 border border-emerald-200 text-emerald-800';
+          unloadToast.textContent = `✓ Unloaded ${json.model} (${json.elapsed_ms} ms). Memory freed.`;
+        } else {
+          unloadToast.className = 'text-xs px-3 py-1.5 rounded-md self-end bg-rose-50 border border-rose-200 text-rose-800';
+          unloadToast.textContent = `Unload failed: ${json.error || 'unknown'}`;
+        }
+      } catch (e) {
+        unloadToast.className = 'text-xs px-3 py-1.5 rounded-md self-end bg-rose-50 border border-rose-200 text-rose-800';
+        unloadToast.textContent = `Unload failed: ${e.message}`;
+      } finally {
+        unloadBtn.disabled = false;
+        // Auto-hide the toast after 5 seconds.
+        setTimeout(() => unloadToast.classList.add('hidden'), 5000);
+      }
+    });
 
     // Per-task hint shown next to the dropdown
     const TASK_HINTS = {

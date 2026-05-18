@@ -369,11 +369,20 @@ def _ollama_pull_hint(model: str, base_url: str) -> str:
     )
 
 
-def build_llm(model: Optional[str] = None, base_url: Optional[str] = None) -> Any:
+def build_llm(model: Optional[str] = None,
+              base_url: Optional[str] = None,
+              keep_alive: Optional[str] = None) -> Any:
     """Construct the default local LLM (ChatOllama).
 
     Resolution order for parameters: explicit args → env vars
-    (`SMARTEMBED_LLM_MODEL`, `OLLAMA_BASE_URL`) → built-in defaults.
+    (`SMARTEMBED_LLM_MODEL`, `OLLAMA_BASE_URL`, `OLLAMA_KEEP_ALIVE`) →
+    built-in defaults.
+
+    `keep_alive` controls how long Ollama keeps the model resident after
+    the call finishes. Default '60s' (down from Ollama's stock 5m) so the
+    model unloads quickly between user clicks on a memory-constrained Mac.
+    Set to '5m' or '0s' or any duration string Ollama accepts; '0' or
+    '0s' unloads immediately after the response is returned.
 
     Verifies that the Ollama server is reachable and that the requested model
     has been pulled. Raises RuntimeError with the exact `ollama pull` command
@@ -382,6 +391,7 @@ def build_llm(model: Optional[str] = None, base_url: Optional[str] = None) -> An
     """
     model = model or os.getenv("SMARTEMBED_LLM_MODEL", DEFAULT_OLLAMA_MODEL)
     base_url = base_url or os.getenv("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL)
+    keep_alive = keep_alive or os.getenv("OLLAMA_KEEP_ALIVE", "60s")
 
     try:
         from langchain_ollama import ChatOllama
@@ -411,7 +421,54 @@ def build_llm(model: Optional[str] = None, base_url: Optional[str] = None) -> An
     if model not in available and f"{model}:latest" not in available:
         raise RuntimeError(_ollama_pull_hint(model, base_url))
 
-    return ChatOllama(model=model, temperature=0, base_url=base_url)
+    return ChatOllama(model=model, temperature=0, base_url=base_url,
+                      keep_alive=keep_alive)
+
+
+def unload_ollama_model(model: Optional[str] = None,
+                         base_url: Optional[str] = None) -> Dict[str, Any]:
+    """Force-unload an Ollama model from memory. Implemented by sending
+    a tiny no-op generate request with keep_alive=0, which causes Ollama
+    to unload immediately after responding.
+
+    Returns a small status dict the caller can surface in a UI/log:
+        {"unloaded": True,  "model": "qwen2.5:32b", "elapsed_ms": 1234}
+        {"unloaded": False, "model": "qwen2.5:32b", "error": "..."}
+    """
+    import time as _time
+    import urllib.request
+    import urllib.error
+
+    model = model or os.getenv("SMARTEMBED_LLM_MODEL", DEFAULT_OLLAMA_MODEL)
+    base_url = base_url or os.getenv("OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL)
+
+    payload = json.dumps({
+        "model": model,
+        "prompt": "",          # empty prompt — no generation work
+        "keep_alive": 0,       # tells Ollama to unload immediately after
+        "stream": False,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{base_url}/api/generate",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    t0 = _time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp.read()
+        return {
+            "unloaded": True,
+            "model": model,
+            "elapsed_ms": int((_time.time() - t0) * 1000),
+        }
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        return {
+            "unloaded": False,
+            "model": model,
+            "error": f"{type(e).__name__}: {e}",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -803,7 +860,10 @@ def _derive_memory_warnings(specs: Dict[str, Any], top_model_size_mb: int) -> Li
         names = ", ".join(m.get("name", "?") for m in ollama_models[:3])
         warnings.append(
             f"Ollama has {ollama_total:.1f} GB of models loaded ({names}). "
-            "Run `ollama stop <name>` before embedding heavy models if memory is tight."
+            "Click the 'Unload LLM' button in the UI (or run `ollama stop <name>`) "
+            "to free this memory immediately. By default the API uses "
+            "keep_alive=60s, so Ollama will also auto-unload 60s after your "
+            "last LLM-mode click."
         )
 
     # 5) High system load — embedder will be slower than the throughput estimate suggests.

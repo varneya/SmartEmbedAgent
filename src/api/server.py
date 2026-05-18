@@ -90,6 +90,7 @@ from src.agent_orchestrator import (  # noqa: E402
     SUPPORTED_TASKS,
     build_llm,
     enrich_model_with_catalog,
+    unload_ollama_model,
 )
 from src.evaluator import evaluate_candidates  # noqa: E402
 from src.agents import run_validated_recommendation  # noqa: E402
@@ -515,6 +516,14 @@ def _run_recommendation(corpus: str, config: Dict[str, Any], use_llm: bool,
         traceback.print_exc()
         notes.append(f"LLM agent failed ({type(e).__name__}: {e}). Used deterministic heuristic instead.")
         return heuristic, notes
+    finally:
+        # Encourage Python to release the AgentExecutor + LangChain tool
+        # wrappers + transient prompt objects we just built. Per-request
+        # accumulation was visible in macOS swap growth across repeated
+        # clicks on the UI 'Recommend' button.
+        if use_llm:
+            import gc as _gc
+            _gc.collect()
 
 
 # ---------------------------------------------------------------------------
@@ -789,6 +798,15 @@ async def validated_recommend_upload(
     finally:
         if tmpdir is not None:
             _cleanup_tempdir(tmpdir)
+
+
+@app.post("/unload_llm")
+def unload_llm() -> Dict[str, Any]:
+    """Force-unload the configured Ollama model from memory. Useful when
+    you've stopped using the LLM-agent path and want to free its RAM
+    (qwen2.5:32b uses ~28GB resident; on a 48GB Mac, that's most of your
+    memory). Returns a small status dict the UI surfaces in a toast."""
+    return unload_ollama_model()
 
 
 @app.get("/recommend/markdown", response_class=PlainTextResponse)
